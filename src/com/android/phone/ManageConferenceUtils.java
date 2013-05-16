@@ -31,7 +31,6 @@ import com.android.internal.telephony.CallerInfo;
 import com.android.internal.telephony.CallerInfoAsyncQuery;
 import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.Connection;
-import com.android.internal.telephony.Phone;
 
 import java.util.List;
 
@@ -39,18 +38,51 @@ import java.util.List;
 /**
  * Helper class to initialize and run the InCallScreen's "Manage conference" UI.
  */
-public class ManageConferenceUtils
-        implements CallerInfoAsyncQuery.OnQueryCompleteListener {
+public class ManageConferenceUtils {
     private static final String LOG_TAG = "ManageConferenceUtils";
     private static final boolean DBG =
-            (PhoneApp.DBG_LEVEL >= 1) && (SystemProperties.getInt("ro.debuggable", 0) == 1);
+            (PhoneGlobals.DBG_LEVEL >= 1) && (SystemProperties.getInt("ro.debuggable", 0) == 1);
+
+    /**
+     * CallerInfoAsyncQuery.OnQueryCompleteListener implementation.
+     *
+     * This object listens for results from the caller-id info queries we
+     * fire off in updateManageConferenceRow(), and updates the
+     * corresponding conference row.
+     */
+    private final class QueryCompleteListener
+            implements CallerInfoAsyncQuery.OnQueryCompleteListener {
+        private final int mConferencCallListIndex;
+
+        public QueryCompleteListener(int index) {
+            mConferencCallListIndex = index;
+        }
+
+        @Override
+        public void onQueryComplete(int token, Object cookie, CallerInfo ci) {
+            if (DBG) log("callerinfo query complete, updating UI." + ci);
+
+            Connection connection = (Connection) cookie;
+            int presentation = connection.getNumberPresentation();
+
+            // get the viewgroup (conference call list item) and make it visible
+            ViewGroup viewGroup = mConferenceCallList[mConferencCallListIndex];
+            viewGroup.setVisibility(View.VISIBLE);
+
+            // update the list item with this information.
+            displayCallerInfoForConferenceRow(ci, presentation,
+                    (TextView) viewGroup.findViewById(R.id.conferenceCallerName),
+                    (TextView) viewGroup.findViewById(R.id.conferenceCallerNumberType),
+                    (TextView) viewGroup.findViewById(R.id.conferenceCallerNumber));
+        }
+    }
 
     private InCallScreen mInCallScreen;
     private CallManager mCM;
 
     // "Manage conference" UI elements and state
     private ViewGroup mManageConferencePanel;
-    private Button mButtonManageConferenceDone;
+    private View mButtonManageConferenceDone;
     private ViewGroup[] mConferenceCallList;
     private int mNumCallersInConference;
     private Chronometer mConferenceTime;
@@ -94,7 +126,7 @@ public class ManageConferenceUtils
                         (ViewGroup) mInCallScreen.findViewById(viewGroupIdList[i]);
             }
 
-            mButtonManageConferenceDone = (Button) mInCallScreen.findViewById(R.id.manage_done);
+            mButtonManageConferenceDone = mInCallScreen.findViewById(R.id.manage_done);
             mButtonManageConferenceDone.setOnClickListener(mInCallScreen);
         }
     }
@@ -183,9 +215,8 @@ public class ManageConferenceUtils
             mConferenceCallList[i].setVisibility(View.VISIBLE);
 
             // get the relevant children views
-            ImageButton endButton = (ImageButton) mConferenceCallList[i].findViewById(
-                    R.id.conferenceCallerDisconnect);
-            ImageButton separateButton = (ImageButton) mConferenceCallList[i].findViewById(
+            View endButton = mConferenceCallList[i].findViewById(R.id.conferenceCallerDisconnect);
+            View separateButton = mConferenceCallList[i].findViewById(
                     R.id.conferenceCallerSeparate);
             TextView nameTextView = (TextView) mConferenceCallList[i].findViewById(
                     R.id.conferenceCallerName);
@@ -198,18 +229,20 @@ public class ManageConferenceUtils
 
             // Hook up this row's buttons.
             View.OnClickListener endThisConnection = new View.OnClickListener() {
+                    @Override
                     public void onClick(View v) {
                         endConferenceConnection(i, connection);
-                        PhoneApp.getInstance().pokeUserActivity();
+                        PhoneGlobals.getInstance().pokeUserActivity();
                     }
                 };
             endButton.setOnClickListener(endThisConnection);
             //
             if (canSeparate) {
                 View.OnClickListener separateThisConnection = new View.OnClickListener() {
+                        @Override
                         public void onClick(View v) {
                             separateConferenceConnection(i, connection);
-                            PhoneApp.getInstance().pokeUserActivity();
+                            PhoneGlobals.getInstance().pokeUserActivity();
                         }
                     };
                 separateButton.setOnClickListener(separateThisConnection);
@@ -219,17 +252,15 @@ public class ManageConferenceUtils
             }
 
             // Name/number for this caller.
-            // TODO: need to deal with private or blocked caller id?
+            QueryCompleteListener listener = new QueryCompleteListener(i);
             PhoneUtils.CallerInfoToken info =
                     PhoneUtils.startGetCallerInfo(mInCallScreen,
-                                                  connection,
-                                                  this,
-                                                  mConferenceCallList[i]);
+                            connection, listener, connection);
             if (DBG) log("  - got info from startGetCallerInfo(): " + info);
 
             // display the CallerInfo.
-            displayCallerInfoForConferenceRow(info.currentInfo, nameTextView,
-                                              numberTypeTextView, numberTextView);
+            displayCallerInfoForConferenceRow(info.currentInfo, connection.getNumberPresentation(),
+                    nameTextView, numberTypeTextView, numberTextView);
         } else {
             // Disable this row of the Manage conference panel:
             mConferenceCallList[i].setVisibility(View.GONE);
@@ -239,11 +270,11 @@ public class ManageConferenceUtils
     /**
      * Helper function to fill out the Conference Call(er) information
      * for each item in the "Manage Conference Call" list.
+     *
+     * @param presentation presentation specified by {@link Connection}.
      */
-    public final void displayCallerInfoForConferenceRow(CallerInfo ci,
-                                                        TextView nameTextView,
-                                                        TextView numberTypeTextView,
-                                                        TextView numberTextView) {
+    public final void displayCallerInfoForConferenceRow(CallerInfo ci, int presentation,
+            TextView nameTextView, TextView numberTypeTextView, TextView numberTextView) {
         // gather the correct name and number information.
         String callerName = "";
         String callerNumber = "";
@@ -251,9 +282,15 @@ public class ManageConferenceUtils
         if (ci != null) {
             callerName = ci.name;
             if (TextUtils.isEmpty(callerName)) {
-                callerName = ci.phoneNumber;
-                if (TextUtils.isEmpty(callerName)) {
-                    callerName = mInCallScreen.getString(R.string.unknown);
+                // Do similar fallback as CallCard does.
+                // See also CallCard#updateDisplayForPerson().
+                if (TextUtils.isEmpty(ci.phoneNumber)) {
+                    callerName = PhoneUtils.getPresentationString(mInCallScreen, presentation);
+                } else if (!TextUtils.isEmpty(ci.cnapName)) {
+                    // No name, but we do have a valid CNAP name, so use that.
+                    callerName = ci.cnapName;
+                } else {
+                    callerName = ci.phoneNumber;
                 }
             } else {
                 callerNumber = ci.phoneNumber;
@@ -312,27 +349,6 @@ public class ManageConferenceUtils
         // conference" UI; that'll happen on its own in a moment (when we
         // get the phone state change event triggered by the call to
         // separateCall().)
-    }
-
-    /**
-     * CallerInfoAsyncQuery.OnQueryCompleteListener implementation.
-     *
-     * This method listens for results from the caller-id info queries we
-     * fire off in updateManageConferenceRow(), and updates the
-     * corresponding conference row.
-     */
-    public void onQueryComplete(int token, Object cookie, CallerInfo ci) {
-        if (DBG) log("callerinfo query complete, updating UI." + ci);
-
-        // get the viewgroup (conference call list item) and make it visible
-        ViewGroup vg = (ViewGroup) cookie;
-        vg.setVisibility(View.VISIBLE);
-
-        // update the list item with this information.
-        displayCallerInfoForConferenceRow(ci,
-                (TextView) vg.findViewById(R.id.conferenceCallerName),
-                (TextView) vg.findViewById(R.id.conferenceCallerNumberType),
-                (TextView) vg.findViewById(R.id.conferenceCallerNumber));
     }
 
 

@@ -14,100 +14,40 @@
      limitations under the License.
 -->
 
-<!-- XML resource file for the *children* of a CallCard used in the Phone app.
-     The CallCard itself is a subclass of FrameLayout, and its (single)
-     child is the LinearLayout found here.  (In the CallCard constructor,
-     we inflate this file and add it as a child.)
-     TODO: consider just <include>ing this directly from incall_screen.xml? -->
-<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- XML resource file for the CallCard used in the Phone app.
+
+     Note that the CallCard is technically the size of the full screen (since
+     our parent container is full-screen, and the layout_width and layout_height
+     here are both "match_parent"), but we manually adjust its bottom margin
+     in CallCard.updateCallInfoLayout() to make sure it doesn't overlap with
+     the onscreen buttons from incall_touch_ui.xml. -->
+<com.android.phone.CallCard xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/call_info_container"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    >
+    android:orientation="vertical">
 
-    <!-- Info about the "secondary" call, displayed at the upper right of
-         the screen.  (If you're on a call with both lines in use, this
-         area displays the status and caller-id info of the call on hold.)
+    <!-- The main content of the CallCard is either one or two "call info"
+         blocks, depending on whether one or two lines are in use.
 
-         This block of info needs to be Z-ordered underneath the
-         primaryCallInfo block, so it's the first child listed here. -->
-    <LinearLayout android:id="@+id/secondaryCallInfo"
-                  android:orientation="vertical"
-                  android:layout_width="160dp"
-                  android:layout_height="wrap_content"
-                  android:gravity="center_horizontal"
-                  android:layout_alignParentTop="true"
-                  android:layout_alignParentRight="true"
-                  android:layout_marginTop="16dp"
-                  >
-        <TextView android:id="@+id/secondaryCallStatus"
-              android:text="@string/onHold"
-              android:textAppearance="?android:attr/textAppearanceMedium"
-              android:textSize="14sp"
-              android:singleLine="true"
-              android:layout_width="wrap_content"
-              android:layout_height="wrap_content"
-              />
+         The call_info blocks are stacked vertically inside a CallCard (LinearLayout),
+         each with layout_weight="1".  If only one line is in use (i.e. the
+         common case) then the 2nd call info will be GONE and thus the 1st one
+         will expand to fill the full height of the CallCard.
 
-        <TextView android:id="@+id/secondaryCallName"
-              android:textAppearance="?android:attr/textAppearanceMedium"
-              android:textSize="14sp"
-              android:singleLine="true"
-              android:layout_width="wrap_content"
-              android:layout_height="wrap_content"
-              android:layout_marginTop="-2dip"
-              />
+         We set a bottom margin on this element dynamically (see
+         updateCallInfoLayout()) to make sure it doesn't overlap with either
+         the bottom button cluster or the incoming-call widget. -->
 
-        <!-- Scaled-down photo, or else a generic placeholder image. -->
-        <ImageView android:id="@+id/secondaryCallPhoto"
-            android:layout_width="106dp"
-            android:layout_height="101dp"
-            android:layout_marginTop="-6dip"
-            android:background="@drawable/incall_photo_border_med"
-            android:contentDescription="@string/onHold"
-            />
-    </LinearLayout>
+    <!-- Primary "Call info" block, for the foreground call. -->
+    <include android:id="@+id/primary_call_info"
+         layout="@layout/primary_call_info" />
 
-    <!-- The main block of info about the "primary" or "active" call -->
-    <LinearLayout
-        android:id="@+id/primaryCallInfo"
-        android:orientation="vertical"
-        android:gravity="center_horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_alignParentTop="true"
-        android:layout_marginTop="18dip"
-        >
+    <!-- Secondary "Call info" block , for the background ("on hold") call. -->
+    <ViewStub android:id="@+id/secondary_call_info"
+         android:layout="@layout/secondary_call_info"
+         android:layout_width="match_parent"
+         android:layout_height="0dp"
+         android:layout_weight="1" />
 
-        <!-- "Upper title" at the very top of the CallCard. -->
-        <TextView android:id="@+id/upperTitle"
-                  android:textAppearance="?android:attr/textAppearanceLarge"
-                  android:textSize="28sp"
-                  android:gravity="center_horizontal"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_marginBottom="10dip"
-                  />
-
-        <!-- "Person info": photo / name / number -->
-        <include layout="@layout/call_card_person_info" />
-
-    </LinearLayout>    <!-- End of (1) The main call card -->
-
-    <!-- The hint about the Menu button, below all the call info.
-         This is only ever shown on devices that actually have a
-         menu while in-call, i.e. it's never shown on devices where the
-         InCallTouchUi is enabled (see InCallScreen.updateMenuButtonHint().) -->
-    <TextView android:id="@+id/menuButtonHint"
-              android:text="@string/menuButtonHint"
-              android:textAppearance="?android:attr/textAppearanceMedium"
-              android:textSize="18sp"
-              android:textColor="?android:attr/textColorSecondary"
-              android:layout_width="wrap_content"
-              android:layout_height="wrap_content"
-              android:layout_below="@id/primaryCallInfo"
-              android:layout_marginTop="22dip"
-              android:layout_centerHorizontal="true"
-              android:visibility="gone"
-              />
-
-</RelativeLayout>
+</com.android.phone.CallCard>

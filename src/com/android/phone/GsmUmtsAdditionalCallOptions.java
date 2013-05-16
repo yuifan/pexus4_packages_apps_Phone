@@ -1,16 +1,19 @@
 package com.android.phone;
 
-import java.util.ArrayList;
-
+import android.app.ActionBar;
+import android.content.Intent;
 import android.os.Bundle;
 import android.preference.Preference;
 import android.preference.PreferenceScreen;
 import android.util.Log;
+import android.view.MenuItem;
+
+import java.util.ArrayList;
 
 public class GsmUmtsAdditionalCallOptions extends
         TimeConsumingPreferenceActivity {
     private static final String LOG_TAG = "GsmUmtsAdditionalCallOptions";
-    private final boolean DBG = (PhoneApp.DBG_LEVEL >= 2);
+    private final boolean DBG = (PhoneGlobals.DBG_LEVEL >= 2);
 
     private static final String BUTTON_CLIR_KEY  = "button_clir_key";
     private static final String BUTTON_CW_KEY    = "button_cw_key";
@@ -18,7 +21,7 @@ public class GsmUmtsAdditionalCallOptions extends
     private CLIRListPreference mCLIRButton;
     private CallWaitingCheckBoxPreference mCWButton;
 
-    private ArrayList<Preference> mPreferences = new ArrayList<Preference> ();
+    private final ArrayList<Preference> mPreferences = new ArrayList<Preference>();
     private int mInitIndex= 0;
 
     @Override
@@ -51,6 +54,12 @@ public class GsmUmtsAdditionalCallOptions extends
                 mCLIRButton.init(this, false);
             }
         }
+
+        ActionBar actionBar = getActionBar();
+        if (actionBar != null) {
+            // android.R.id.home will be triggered in onOptionsItemSelected()
+            actionBar.setDisplayHomeAsUpEnabled(true);
+        }
     }
 
     @Override
@@ -74,4 +83,13 @@ public class GsmUmtsAdditionalCallOptions extends
         super.onFinished(preference, reading);
     }
 
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        final int itemId = item.getItemId();
+        if (itemId == android.R.id.home) {  // See ActionBar#setDisplayHomeAsUpEnabled()
+            CallFeaturesSetting.goUpToTopLevelSetting(this);
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
 }

@@ -33,11 +33,12 @@ import android.preference.Preference;
 import android.preference.PreferenceActivity;
 import android.preference.PreferenceGroup;
 import android.preference.PreferenceScreen;
+import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.Phone;
-import com.android.internal.telephony.gsm.NetworkInfo;
+import com.android.internal.telephony.OperatorInfo;
 
 import java.util.HashMap;
 import java.util.List;
@@ -66,7 +67,7 @@ public class NetworkSetting extends PreferenceActivity
     private static final String BUTTON_AUTO_SELECT_KEY = "button_auto_select_key";
 
     //map of network controls to the network data.
-    private HashMap<Preference, NetworkInfo> mNetworkMap;
+    private HashMap<Preference, OperatorInfo> mNetworkMap;
 
     Phone mPhone;
     protected boolean mIsForeground = false;
@@ -85,7 +86,7 @@ public class NetworkSetting extends PreferenceActivity
             AsyncResult ar;
             switch (msg.what) {
                 case EVENT_NETWORK_SCAN_COMPLETED:
-                    networksListLoaded ((List<NetworkInfo>) msg.obj, msg.arg1);
+                    networksListLoaded ((List<OperatorInfo>) msg.obj, msg.arg1);
                     break;
 
                 case EVENT_NETWORK_SELECTION_DONE:
@@ -105,8 +106,15 @@ public class NetworkSetting extends PreferenceActivity
                 case EVENT_AUTO_SELECT_DONE:
                     if (DBG) log("hideProgressPanel");
 
-                    if (mIsForeground) {
+                    // Always try to dismiss the dialog because activity may
+                    // be moved to background after dialog is shown.
+                    try {
                         dismissDialog(DIALOG_NETWORK_AUTO_SELECT);
+                    } catch (IllegalArgumentException e) {
+                        // "auto select" is always trigged in foreground, so "auto select" dialog
+                        //  should be shown when "auto select" is trigged. Should NOT get
+                        // this exception, and Log it.
+                        Log.w(LOG_TAG, "[NetworksList] Fail to dismiss auto select dialog", e);
                     }
                     getPreferenceScreen().setEnabled(true);
 
@@ -159,7 +167,7 @@ public class NetworkSetting extends PreferenceActivity
     private final INetworkQueryServiceCallback mCallback = new INetworkQueryServiceCallback.Stub() {
 
         /** place the message on the looper queue upon query completion. */
-        public void onQueryComplete(List<NetworkInfo> networkInfoArray, int status) {
+        public void onQueryComplete(List<OperatorInfo> networkInfoArray, int status) {
             if (DBG) log("notifying message loop of query completion.");
             Message msg = mHandler.obtainMessage(EVENT_NETWORK_SCAN_COMPLETED,
                     status, 0, networkInfoArray);
@@ -205,7 +213,7 @@ public class NetworkSetting extends PreferenceActivity
         finish();
     }
 
-    public String getNormalizedCarrierName(NetworkInfo ni) {
+    public String getNormalizedCarrierName(OperatorInfo ni) {
         if (ni != null) {
             return ni.getOperatorAlphaLong() + " (" + ni.getOperatorNumeric() + ")";
         }
@@ -218,10 +226,10 @@ public class NetworkSetting extends PreferenceActivity
 
         addPreferencesFromResource(R.xml.carrier_select);
 
-        mPhone = PhoneApp.getInstance().phone;
+        mPhone = PhoneGlobals.getPhone();
 
         mNetworkList = (PreferenceGroup) getPreferenceScreen().findPreference(LIST_NETWORKS_KEY);
-        mNetworkMap = new HashMap<Preference, NetworkInfo>();
+        mNetworkMap = new HashMap<Preference, OperatorInfo>();
 
         mSearchButton = getPreferenceScreen().findPreference(BUTTON_SRCH_NETWRKS_KEY);
         mAutoSelect = getPreferenceScreen().findPreference(BUTTON_AUTO_SELECT_KEY);
@@ -286,7 +294,7 @@ public class NetworkSetting extends PreferenceActivity
                 default:
                     // reinstate the cancelablity of the dialog.
                     dialog.setMessage(getResources().getString(R.string.load_networks_progress));
-                    dialog.setCancelable(true);
+                    dialog.setCanceledOnTouchOutside(false);
                     dialog.setOnCancelListener(this);
                     break;
             }
@@ -321,8 +329,9 @@ public class NetworkSetting extends PreferenceActivity
     private void displayNetworkQueryFailed(int error) {
         String status = getResources().getString(R.string.network_query_error);
 
-        NotificationMgr.getDefault().postTransientNotification(
-                        NotificationMgr.NETWORK_SELECTION_NOTIFICATION, status);
+        final PhoneGlobals app = PhoneGlobals.getInstance();
+        app.notificationMgr.postTransientNotification(
+                NotificationMgr.NETWORK_SELECTION_NOTIFICATION, status);
     }
 
     private void displayNetworkSelectionFailed(Throwable ex) {
@@ -337,15 +346,17 @@ public class NetworkSetting extends PreferenceActivity
             status = getResources().getString(R.string.connect_later);
         }
 
-        NotificationMgr.getDefault().postTransientNotification(
-                        NotificationMgr.NETWORK_SELECTION_NOTIFICATION, status);
+        final PhoneGlobals app = PhoneGlobals.getInstance();
+        app.notificationMgr.postTransientNotification(
+                NotificationMgr.NETWORK_SELECTION_NOTIFICATION, status);
     }
 
     private void displayNetworkSelectionSucceeded() {
         String status = getResources().getString(R.string.registration_done);
 
-        NotificationMgr.getDefault().postTransientNotification(
-                        NotificationMgr.NETWORK_SELECTION_NOTIFICATION, status);
+        final PhoneGlobals app = PhoneGlobals.getInstance();
+        app.notificationMgr.postTransientNotification(
+                NotificationMgr.NETWORK_SELECTION_NOTIFICATION, status);
 
         mHandler.postDelayed(new Runnable() {
             public void run() {
@@ -372,19 +383,27 @@ public class NetworkSetting extends PreferenceActivity
 
     /**
      * networksListLoaded has been rewritten to take an array of
-     * NetworkInfo objects and a status field, instead of an
+     * OperatorInfo objects and a status field, instead of an
      * AsyncResult.  Otherwise, the functionality which takes the
-     * NetworkInfo array and creates a list of preferences from it,
+     * OperatorInfo array and creates a list of preferences from it,
      * remains unchanged.
      */
-    private void networksListLoaded(List<NetworkInfo> result, int status) {
+    private void networksListLoaded(List<OperatorInfo> result, int status) {
         if (DBG) log("networks list loaded");
 
         // update the state of the preferences.
         if (DBG) log("hideProgressPanel");
 
-        if (mIsForeground) {
+
+        // Always try to dismiss the dialog because activity may
+        // be moved to background after dialog is shown.
+        try {
             dismissDialog(DIALOG_NETWORK_LIST_LOAD);
+        } catch (IllegalArgumentException e) {
+            // It's not a error in following scenario, we just ignore it.
+            // "Load list" dialog will not show, if NetworkQueryService is
+            // connected after this activity is moved to background.
+            if (DBG) log("Fail to dismiss network load list dialog");
         }
 
         getPreferenceScreen().setEnabled(true);
@@ -401,9 +420,9 @@ public class NetworkSetting extends PreferenceActivity
                 // create a preference for each item in the list.
                 // just use the operator name instead of the mildly
                 // confusing mcc/mnc.
-                for (NetworkInfo ni : result) {
+                for (OperatorInfo ni : result) {
                     Preference carrier = new Preference(this, null);
-                    carrier.setTitle(ni.getOperatorAlphaLong());
+                    carrier.setTitle(getNetworkTitle(ni));
                     carrier.setPersistent(false);
                     mNetworkList.addPreference(carrier);
                     mNetworkMap.put(carrier, ni);
@@ -414,6 +433,25 @@ public class NetworkSetting extends PreferenceActivity
             } else {
                 displayEmptyNetworkList(true);
             }
+        }
+    }
+
+    /**
+     * Returns the title of the network obtained in the manual search.
+     *
+     * @param OperatorInfo contains the information of the network.
+     *
+     * @return Long Name if not null/empty, otherwise Short Name if not null/empty,
+     * else MCCMNC string.
+     */
+
+    private String getNetworkTitle(OperatorInfo ni) {
+        if (!TextUtils.isEmpty(ni.getOperatorAlphaLong())) {
+            return ni.getOperatorAlphaLong();
+        } else if (!TextUtils.isEmpty(ni.getOperatorAlphaShort())) {
+            return ni.getOperatorAlphaShort();
+        } else {
+            return ni.getOperatorNumeric();
         }
     }
 
@@ -438,4 +476,3 @@ public class NetworkSetting extends PreferenceActivity
         Log.d(LOG_TAG, "[NetworksList] " + msg);
     }
 }
-

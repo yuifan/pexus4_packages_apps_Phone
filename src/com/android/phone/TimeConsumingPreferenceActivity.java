@@ -21,10 +21,27 @@ interface  TimeConsumingPreferenceListener {
 }
 
 public class TimeConsumingPreferenceActivity extends PreferenceActivity
-                        implements TimeConsumingPreferenceListener, DialogInterface.OnClickListener,
+                        implements TimeConsumingPreferenceListener,
                         DialogInterface.OnCancelListener {
     private static final String LOG_TAG = "TimeConsumingPreferenceActivity";
-    private final boolean DBG = (PhoneApp.DBG_LEVEL >= 2);
+    private final boolean DBG = (PhoneGlobals.DBG_LEVEL >= 2);
+
+    private class DismissOnClickListener implements DialogInterface.OnClickListener {
+        @Override
+        public void onClick(DialogInterface dialog, int which) {
+            dialog.dismiss();
+        }
+    }
+    private class DismissAndFinishOnClickListener implements DialogInterface.OnClickListener {
+        @Override
+        public void onClick(DialogInterface dialog, int which) {
+            dialog.dismiss();
+            finish();
+        }
+    }
+    private final DialogInterface.OnClickListener mDismiss = new DismissOnClickListener();
+    private final DialogInterface.OnClickListener mDismissAndFinish
+            = new DismissAndFinishOnClickListener();
 
     private static final int BUSY_READING_DIALOG = 100;
     private static final int BUSY_SAVING_DIALOG = 200;
@@ -34,7 +51,7 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
     static final int RADIO_OFF_ERROR = 500;
     static final int FDN_CHECK_FAILURE = 600;
 
-    private final ArrayList<String> mBusyList=new ArrayList<String> ();
+    private final ArrayList<String> mBusyList = new ArrayList<String>();
 
     protected boolean mIsForeground = false;
 
@@ -61,7 +78,7 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
 
         if (id == RESPONSE_ERROR || id == RADIO_OFF_ERROR || id == EXCEPTION_ERROR
                 || id == FDN_CHECK_FAILURE) {
-            AlertDialog.Builder b = new AlertDialog.Builder(this);
+            AlertDialog.Builder builder = new AlertDialog.Builder(this);
 
             int msgId;
             int titleId = R.string.error_updating_title;
@@ -69,33 +86,29 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
             switch (id) {
                 case RESPONSE_ERROR:
                     msgId = R.string.response_error;
-                    // Set Button 2, tells the activity that the error is
-                    // recoverable on dialog exit.
-                    b.setNegativeButton(R.string.close_dialog, this);
+                    builder.setPositiveButton(R.string.close_dialog, mDismiss);
                     break;
                 case RADIO_OFF_ERROR:
                     msgId = R.string.radio_off_error;
-                    // Set Button 3
-                    b.setNeutralButton(R.string.close_dialog, this);
+                    // The error is not recoverable on dialog exit.
+                    builder.setPositiveButton(R.string.close_dialog, mDismissAndFinish);
                     break;
                 case FDN_CHECK_FAILURE:
-                    msgId = R.string.fdn_only_error;
-                    // Set Button 2
-                    b.setNegativeButton(R.string.close_dialog, this);
+                    msgId = R.string.fdn_check_failure;
+                    builder.setPositiveButton(R.string.close_dialog, mDismiss);
                     break;
                 case EXCEPTION_ERROR:
                 default:
                     msgId = R.string.exception_error;
-                    // Set Button 3, tells the activity that the error is
-                    // not recoverable on dialog exit.
-                    b.setNeutralButton(R.string.close_dialog, this);
+                    // The error is not recoverable on dialog exit.
+                    builder.setPositiveButton(R.string.close_dialog, mDismissAndFinish);
                     break;
             }
 
-            b.setTitle(getText(titleId));
-            b.setMessage(getText(msgId));
-            b.setCancelable(false);
-            AlertDialog dialog = b.create();
+            builder.setTitle(getText(titleId));
+            builder.setMessage(getText(msgId));
+            builder.setCancelable(false);
+            AlertDialog dialog = builder.create();
 
             // make the dialog more obvious by blurring the background.
             dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
@@ -117,10 +130,7 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
         mIsForeground = false;
     }
 
-    public void onClick(DialogInterface dialog, int which) {
-        dialog.dismiss();
-    }
-
+    @Override
     public void onStarted(Preference preference, boolean reading) {
         if (DBG) dumpState();
         if (DBG) Log.d(LOG_TAG, "onStarted, preference=" + preference.getKey()
@@ -137,21 +147,24 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
 
     }
 
+    @Override
     public void onFinished(Preference preference, boolean reading) {
         if (DBG) dumpState();
         if (DBG) Log.d(LOG_TAG, "onFinished, preference=" + preference.getKey()
                 + ", reading=" + reading);
         mBusyList.remove(preference.getKey());
 
-        if (mBusyList.isEmpty() && mIsForeground) {
+        if (mBusyList.isEmpty()) {
             if (reading) {
                 dismissDialogSafely(BUSY_READING_DIALOG);
             } else {
                 dismissDialogSafely(BUSY_SAVING_DIALOG);
             }
         }
+        preference.setEnabled(true);
     }
 
+    @Override
     public void onError(Preference preference, int error) {
         if (DBG) dumpState();
         if (DBG) Log.d(LOG_TAG, "onError, preference=" + preference.getKey() + ", error=" + error);
@@ -159,8 +172,10 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
         if (mIsForeground) {
             showDialog(error);
         }
+        preference.setEnabled(false);
     }
 
+    @Override
     public void onException(Preference preference, CommandException exception) {
         if (exception.getCommandError() == CommandException.Error.FDN_CHECK_FAILURE) {
             onError(preference, FDN_CHECK_FAILURE);
@@ -169,6 +184,8 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
             onError(preference, EXCEPTION_ERROR);
         }
     }
+
+    @Override
     public void onCancel(DialogInterface dialog) {
         if (DBG) dumpState();
         finish();
@@ -184,7 +201,7 @@ public class TimeConsumingPreferenceActivity extends PreferenceActivity
         }
     }
 
-    void dumpState() {
+    /* package */ void dumpState() {
         Log.d(LOG_TAG, "dumpState begin");
         for (String key : mBusyList) {
             Log.d(LOG_TAG, "mBusyList: key=" + key);

@@ -19,18 +19,16 @@ package com.android.phone;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.app.StatusBarManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
-import android.graphics.drawable.Drawable;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Message;
 import android.provider.Settings;
 import android.telephony.PhoneNumberUtils;
 import android.text.Editable;
@@ -39,9 +37,12 @@ import android.text.TextWatcher;
 import android.text.method.DialerKeyListener;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.accessibility.AccessibilityManager;
 import android.widget.EditText;
+
 
 /**
  * EmergencyDialer is a special dialer that is used ONLY for dialing emergency calls.
@@ -60,18 +61,28 @@ import android.widget.EditText;
  * Or could we figure out some way to move *this* class into apps/Contacts
  * also?
  */
-public class EmergencyDialer extends Activity
-        implements View.OnClickListener, View.OnLongClickListener,
-        View.OnKeyListener, TextWatcher {
+public class EmergencyDialer extends Activity implements View.OnClickListener,
+        View.OnLongClickListener, View.OnHoverListener, View.OnKeyListener, TextWatcher {
     // Keys used with onSaveInstanceState().
     private static final String LAST_NUMBER = "lastNumber";
 
     // Intent action for this activity.
     public static final String ACTION_DIAL = "com.android.phone.EmergencyDialer.DIAL";
 
+    // List of dialer button IDs.
+    private static final int[] DIALER_KEYS = new int[] {
+            R.id.one, R.id.two, R.id.three,
+            R.id.four, R.id.five, R.id.six,
+            R.id.seven, R.id.eight, R.id.nine,
+            R.id.star, R.id.zero, R.id.pound };
+
     // Debug constants.
     private static final boolean DBG = false;
     private static final String LOG_TAG = "EmergencyDialer";
+
+    private PhoneGlobals mApp;
+    private StatusBarManager mStatusBarManager;
+    private AccessibilityManager mAccessibilityManager;
 
     /** The length of DTMF tones in milliseconds */
     private static final int TONE_LENGTH_MS = 150;
@@ -80,22 +91,18 @@ public class EmergencyDialer extends Activity
     private static final int TONE_RELATIVE_VOLUME = 80;
 
     /** Stream type used to play the DTMF tones off call, and mapped to the volume control keys */
-    private static final int DIAL_TONE_STREAM_TYPE = AudioManager.STREAM_MUSIC;
+    private static final int DIAL_TONE_STREAM_TYPE = AudioManager.STREAM_DTMF;
 
     private static final int BAD_EMERGENCY_NUMBER_DIALOG = 0;
 
+    private static final int USER_ACTIVITY_TIMEOUT_WHEN_NO_PROX_SENSOR = 15000; // millis
+
     EditText mDigits;
-    // If mVoicemailDialAndDeleteRow is null, mDialButton and mDelete are also null.
-    private View mVoicemailDialAndDeleteRow;
     private View mDialButton;
     private View mDelete;
 
     private ToneGenerator mToneGenerator;
     private Object mToneGeneratorLock = new Object();
-
-    // new UI background assets
-    private Drawable mDigitsBackground;
-    private Drawable mDigitsEmptyBackground;
 
     // determines if we want to playback local DTMF tones.
     private boolean mDTMFToneEnabled;
@@ -105,6 +112,7 @@ public class EmergencyDialer extends Activity
 
     // close activity when screen turns off
     private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+        @Override
         public void onReceive(Context context, Intent intent) {
             if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
                 finish();
@@ -114,15 +122,17 @@ public class EmergencyDialer extends Activity
 
     private String mLastNumber; // last number we tried to dial. Used to restore error dialog.
 
+    @Override
     public void beforeTextChanged(CharSequence s, int start, int count, int after) {
         // Do nothing
     }
 
+    @Override
     public void onTextChanged(CharSequence input, int start, int before, int changeCount) {
         // Do nothing
     }
 
-
+    @Override
     public void afterTextChanged(Editable input) {
         // Check for special sequences, in particular the "**04" or "**05"
         // sequences that allow you to enter PIN or PUK-related codes.
@@ -138,13 +148,6 @@ public class EmergencyDialer extends Activity
             mDigits.getText().clear();
         }
 
-        final boolean notEmpty = mDigits.length() != 0;
-        if (notEmpty) {
-            mDigits.setBackgroundDrawable(mDigitsBackground);
-        } else {
-            mDigits.setBackgroundDrawable(mDigitsEmptyBackground);
-        }
-
         updateDialAndDeleteButtonStateEnabledAttr();
     }
 
@@ -152,22 +155,30 @@ public class EmergencyDialer extends Activity
     protected void onCreate(Bundle icicle) {
         super.onCreate(icicle);
 
-        // set this flag so this activity will stay in front of the keyguard
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
+        mApp = PhoneGlobals.getInstance();
+        mStatusBarManager = (StatusBarManager) getSystemService(Context.STATUS_BAR_SERVICE);
+        mAccessibilityManager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
 
-        // Set the content view
+        // Allow this activity to be displayed in front of the keyguard / lockscreen.
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.flags |= WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED;
+        if (!mApp.proximitySensorModeEnabled()) {
+            // When no proximity sensor is available, use a shorter timeout.
+            lp.userActivityTimeout = USER_ACTIVITY_TIMEOUT_WHEN_NO_PROX_SENSOR;
+        }
+        getWindow().setAttributes(lp);
+
         setContentView(R.layout.emergency_dialer);
-
-        // Load up the resources for the text field and delete button
-        Resources r = getResources();
-        mDigitsBackground = r.getDrawable(R.drawable.btn_dial_textfield_active);
-        mDigitsEmptyBackground = r.getDrawable(R.drawable.btn_dial_textfield);
 
         mDigits = (EditText) findViewById(R.id.digits);
         mDigits.setKeyListener(DialerKeyListener.getInstance());
         mDigits.setOnClickListener(this);
         mDigits.setOnKeyListener(this);
         mDigits.setLongClickable(false);
+        if (mAccessibilityManager.isEnabled()) {
+            // The text view must be selected to send accessibility events.
+            mDigits.setSelected(true);
+        }
         maybeAddNumberFormatting();
 
         // Check for the presence of the keypad
@@ -176,31 +187,31 @@ public class EmergencyDialer extends Activity
             setupKeypad();
         }
 
-        mVoicemailDialAndDeleteRow = findViewById(R.id.voicemailAndDialAndDelete);
+        mDelete = findViewById(R.id.deleteButton);
+        mDelete.setOnClickListener(this);
+        mDelete.setOnLongClickListener(this);
+
+        mDialButton = findViewById(R.id.dialButton);
 
         // Check whether we should show the onscreen "Dial" button and co.
-        if (r.getBoolean(R.bool.config_show_onscreen_dial_button)) {
-
-            // The voicemail button is not active. Even if we marked
-            // it as disabled in the layout, we have to manually clear
-            // that state as well (b/2134374)
-            // TODO: Check with UI designer if we should not show that button at all. (b/2134854)
-            mVoicemailDialAndDeleteRow.findViewById(R.id.voicemailButton).setEnabled(false);
-
-            mDialButton = mVoicemailDialAndDeleteRow.findViewById(R.id.dialButton);
+        Resources res = getResources();
+        if (res.getBoolean(R.bool.config_show_onscreen_dial_button)) {
             mDialButton.setOnClickListener(this);
-
-            mDelete = mVoicemailDialAndDeleteRow.findViewById(R.id.deleteButton);
-            mDelete.setOnClickListener(this);
-            mDelete.setOnLongClickListener(this);
         } else {
-            mVoicemailDialAndDeleteRow.setVisibility(View.GONE); // It's VISIBLE by default
-            mVoicemailDialAndDeleteRow = null;
+            mDialButton.setVisibility(View.GONE);
         }
-
 
         if (icicle != null) {
             super.onRestoreInstanceState(icicle);
+        }
+
+        // Extract phone number from intent
+        Uri data = getIntent().getData();
+        if (data != null && (Constants.SCHEME_TEL.equals(data.getScheme()))) {
+            String number = PhoneNumberUtils.getNumberFromIntent(getIntent(), this);
+            if (number != null) {
+                mDigits.setText(number);
+            }
         }
 
         // if the mToneGenerator creation fails, just continue without it.  It is
@@ -208,11 +219,7 @@ public class EmergencyDialer extends Activity
         synchronized (mToneGeneratorLock) {
             if (mToneGenerator == null) {
                 try {
-                    // we want the user to be able to control the volume of the dial tones
-                    // outside of a call, so we use the stream type that is also mapped to the
-                    // volume control keys for this activity
                     mToneGenerator = new ToneGenerator(DIAL_TONE_STREAM_TYPE, TONE_RELATIVE_VOLUME);
-                    setVolumeControlStream(DIAL_TONE_STREAM_TYPE);
                 } catch (RuntimeException e) {
                     Log.w(LOG_TAG, "Exception caught while creating local tone generator: " + e);
                     mToneGenerator = null;
@@ -225,7 +232,7 @@ public class EmergencyDialer extends Activity
         registerReceiver(mBroadcastReceiver, intentFilter);
 
         try {
-            mHaptic.init(this, r.getBoolean(R.bool.config_enable_dialer_key_vibration));
+            mHaptic.init(this, res.getBoolean(R.bool.config_enable_dialer_key_vibration));
         } catch (Resources.NotFoundException nfe) {
              Log.e(LOG_TAG, "Vibrate control bool missing.", nfe);
         }
@@ -275,22 +282,14 @@ public class EmergencyDialer extends Activity
 
     private void setupKeypad() {
         // Setup the listeners for the buttons
-        findViewById(R.id.one).setOnClickListener(this);
-        findViewById(R.id.two).setOnClickListener(this);
-        findViewById(R.id.three).setOnClickListener(this);
-        findViewById(R.id.four).setOnClickListener(this);
-        findViewById(R.id.five).setOnClickListener(this);
-        findViewById(R.id.six).setOnClickListener(this);
-        findViewById(R.id.seven).setOnClickListener(this);
-        findViewById(R.id.eight).setOnClickListener(this);
-        findViewById(R.id.nine).setOnClickListener(this);
-        findViewById(R.id.star).setOnClickListener(this);
+        for (int id : DIALER_KEYS) {
+            final View key = findViewById(id);
+            key.setOnClickListener(this);
+            key.setOnHoverListener(this);
+        }
 
         View view = findViewById(R.id.zero);
-        view.setOnClickListener(this);
         view.setOnLongClickListener(this);
-
-        findViewById(R.id.pound).setOnClickListener(this);
     }
 
     /**
@@ -299,6 +298,7 @@ public class EmergencyDialer extends Activity
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         switch (keyCode) {
+            // Happen when there's a "Call" hard button.
             case KeyEvent.KEYCODE_CALL: {
                 if (TextUtils.isEmpty(mDigits.getText().toString())) {
                     // if we are adding a call from the InCallScreen and the phone
@@ -321,10 +321,14 @@ public class EmergencyDialer extends Activity
         mDigits.onKeyDown(keyCode, event);
     }
 
+    @Override
     public boolean onKey(View view, int keyCode, KeyEvent event) {
         switch (view.getId()) {
             case R.id.digits:
-                if (keyCode == KeyEvent.KEYCODE_ENTER) {
+                // Happen when "Done" button of the IME is pressed. This can happen when this
+                // Activity is forced into landscape mode due to a desk dock.
+                if (keyCode == KeyEvent.KEYCODE_ENTER
+                        && event.getAction() == KeyEvent.ACTION_UP) {
                     placeCall();
                     return true;
                 }
@@ -333,6 +337,7 @@ public class EmergencyDialer extends Activity
         return false;
     }
 
+    @Override
     public void onClick(View view) {
         switch (view.getId()) {
             case R.id.one: {
@@ -414,8 +419,43 @@ public class EmergencyDialer extends Activity
     }
 
     /**
+     * Implemented for {@link android.view.View.OnHoverListener}. Handles touch
+     * events for accessibility when touch exploration is enabled.
+     */
+    @Override
+    public boolean onHover(View v, MotionEvent event) {
+        // When touch exploration is turned on, lifting a finger while inside
+        // the button's hover target bounds should perform a click action.
+        if (mAccessibilityManager.isEnabled()
+                && mAccessibilityManager.isTouchExplorationEnabled()) {
+
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_HOVER_ENTER:
+                    // Lift-to-type temporarily disables double-tap activation.
+                    v.setClickable(false);
+                    break;
+                case MotionEvent.ACTION_HOVER_EXIT:
+                    final int left = v.getPaddingLeft();
+                    final int right = (v.getWidth() - v.getPaddingRight());
+                    final int top = v.getPaddingTop();
+                    final int bottom = (v.getHeight() - v.getPaddingBottom());
+                    final int x = (int) event.getX();
+                    final int y = (int) event.getY();
+                    if ((x > left) && (x < right) && (y > top) && (y < bottom)) {
+                        v.performClick();
+                    }
+                    v.setClickable(true);
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * called for long touch events
      */
+    @Override
     public boolean onLongClick(View view) {
         int id = view.getId();
         switch (id) {
@@ -463,9 +503,7 @@ public class EmergencyDialer extends Activity
         // Disable the status bar and set the poke lock timeout to medium.
         // There is no need to do anything with the wake lock.
         if (DBG) Log.d(LOG_TAG, "disabling status bar, set to long timeout");
-        PhoneApp app = (PhoneApp) getApplication();
-        app.disableStatusBar();
-        app.setScreenTimeout(PhoneApp.ScreenTimeoutDuration.MEDIUM);
+        mStatusBarManager.disable(StatusBarManager.DISABLE_EXPAND);
 
         updateDialAndDeleteButtonStateEnabledAttr();
     }
@@ -475,9 +513,7 @@ public class EmergencyDialer extends Activity
         // Reenable the status bar and set the poke lock timeout to default.
         // There is no need to do anything with the wake lock.
         if (DBG) Log.d(LOG_TAG, "reenabling status bar and closing the dialer");
-        PhoneApp app = (PhoneApp) getApplication();
-        app.reenableStatusBar();
-        app.setScreenTimeout(PhoneApp.ScreenTimeoutDuration.DEFAULT);
+        mStatusBarManager.disable(StatusBarManager.DISABLE_NONE);
 
         super.onPause();
 
@@ -492,9 +528,9 @@ public class EmergencyDialer extends Activity
     /**
      * place the call, but check to make sure it is a viable number.
      */
-    void placeCall() {
+    private void placeCall() {
         mLastNumber = mDigits.getText().toString();
-        if (PhoneNumberUtils.isEmergencyNumber(mLastNumber)) {
+        if (PhoneNumberUtils.isLocalEmergencyNumber(mLastNumber, this)) {
             if (DBG) Log.d(LOG_TAG, "placing call to " + mLastNumber);
 
             // place the call if it is a valid number
@@ -504,7 +540,7 @@ public class EmergencyDialer extends Activity
                 return;
             }
             Intent intent = new Intent(Intent.ACTION_CALL_EMERGENCY);
-            intent.setData(Uri.fromParts("tel", mLastNumber, null));
+            intent.setData(Uri.fromParts(Constants.SCHEME_TEL, mLastNumber, null));
             intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
             finish();
@@ -516,7 +552,6 @@ public class EmergencyDialer extends Activity
             showDialog(BAD_EMERGENCY_NUMBER_DIALOG);
         }
     }
-
 
     /**
      * Plays the specified tone for TONE_LENGTH_MS milliseconds.
@@ -594,11 +629,9 @@ public class EmergencyDialer extends Activity
      * Update the enabledness of the "Dial" and "Backspace" buttons if applicable.
      */
     private void updateDialAndDeleteButtonStateEnabledAttr() {
-        if (null != mVoicemailDialAndDeleteRow) {
-            final boolean notEmpty = mDigits.length() != 0;
+        final boolean notEmpty = mDigits.length() != 0;
 
-            mDialButton.setEnabled(notEmpty);
-            mDelete.setEnabled(notEmpty);
-        }
+        mDialButton.setEnabled(notEmpty);
+        mDelete.setEnabled(notEmpty);
     }
 }

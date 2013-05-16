@@ -21,23 +21,36 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
-import android.provider.Telephony.Intents;
-import com.android.internal.telephony.PhoneFactory;
+import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.telephony.Phone;
 import android.telephony.PhoneNumberUtils;
 import android.util.Log;
 import android.view.WindowManager;
 
+import com.android.internal.telephony.TelephonyCapabilities;
+
 /**
- * Helper class to listen for some magic character sequences
+ * Helper class to listen for some magic dialpad character sequences
  * that are handled specially by the Phone app.
+ *
+ * Note the Contacts app also handles these sequences too, so there's a
+ * separate version of this class under apps/Contacts.
+ *
+ * In fact, the most common use case for these special sequences is typing
+ * them from the regular "Dialer" used for outgoing calls, which is part
+ * of the contacts app; see DialtactsActivity and DialpadFragment.
+ * *This* version of SpecialCharSequenceMgr is used for only a few
+ * relatively obscure places in the UI:
+ * - The "SIM network unlock" PIN entry screen (see
+ *   IccNetworkDepersonalizationPanel.java)
+ * - The emergency dialer (see EmergencyDialer.java).
  *
  * TODO: there's lots of duplicated code between this class and the
  * corresponding class under apps/Contacts.  Let's figure out a way to
  * unify these two classes (in the framework? in a common shared library?)
  */
 public class SpecialCharSequenceMgr {
-    private static final String TAG = PhoneApp.LOG_TAG;
+    private static final String TAG = PhoneGlobals.LOG_TAG;
     private static final boolean DBG = false;
 
     private static final String MMI_IMEI_DISPLAY = "*#06#";
@@ -135,7 +148,7 @@ public class SpecialCharSequenceMgr {
         // Secret codes are in the form *#*#<code>#*#*
         int len = input.length();
         if (len > 8 && input.startsWith("*#*#") && input.endsWith("#*#*")) {
-            Intent intent = new Intent(Intents.SECRET_CODE_ACTION,
+            Intent intent = new Intent(TelephonyIntents.SECRET_CODE_ACTION,
                     Uri.parse("android_secret_code://" + input.substring(4, len - 4)));
             context.sendBroadcast(intent);
             return true;
@@ -151,7 +164,7 @@ public class SpecialCharSequenceMgr {
         // input.  We want to make sure that sim card contacts are NOT
         // exposed unless the phone is unlocked, and this code can be
         // accessed from the emergency dialer.
-        if (PhoneApp.getInstance().getKeyguardManager().inKeyguardRestrictedInputMode()) {
+        if (PhoneGlobals.getInstance().getKeyguardManager().inKeyguardRestrictedInputMode()) {
             return false;
         }
 
@@ -165,7 +178,7 @@ public class SpecialCharSequenceMgr {
                                     "com.android.phone.SimContacts");
                 intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 intent.putExtra("index", index);
-                PhoneApp.getInstance().startActivity(intent);
+                PhoneGlobals.getInstance().startActivity(intent);
 
                 return true;
             } catch (NumberFormatException ex) {}
@@ -180,7 +193,7 @@ public class SpecialCharSequenceMgr {
         // if a dialstring is an MMI code.
         if ((input.startsWith("**04") || input.startsWith("**05"))
                 && input.endsWith("#")) {
-            PhoneApp app = PhoneApp.getInstance();
+            PhoneGlobals app = PhoneGlobals.getInstance();
             boolean isMMIHandled = app.phone.handlePinMmi(input);
 
             // if the PUK code is recognized then indicate to the
@@ -199,47 +212,28 @@ public class SpecialCharSequenceMgr {
     static private boolean handleIMEIDisplay(Context context,
                                              String input) {
         if (input.equals(MMI_IMEI_DISPLAY)) {
-            int phoneType = PhoneApp.getInstance().phone.getPhoneType();
-            if (phoneType == Phone.PHONE_TYPE_CDMA) {
-                showMEIDPanel(context);
-                return true;
-            } else if (phoneType == Phone.PHONE_TYPE_GSM) {
-                showIMEIPanel(context);
-                return true;
-            }
+            showDeviceIdPanel(context);
+            return true;
         }
 
         return false;
     }
 
-    // TODO: showIMEIPanel and showMEIDPanel are almost cut and paste
-    // clones. Refactor.
-    static private void showIMEIPanel(Context context) {
-        if (DBG) log("showIMEIPanel");
+    static private void showDeviceIdPanel(Context context) {
+        if (DBG) log("showDeviceIdPanel()...");
 
-        String imeiStr = PhoneFactory.getDefaultPhone().getDeviceId();
-
-        AlertDialog alert = new AlertDialog.Builder(context)
-                .setTitle(R.string.imei)
-                .setMessage(imeiStr)
-                .setPositiveButton(R.string.ok, null)
-                .setCancelable(false)
-                .show();
-        alert.getWindow().setType(WindowManager.LayoutParams.TYPE_PRIORITY_PHONE);
-    }
-
-    static private void showMEIDPanel(Context context) {
-        if (DBG) log("showMEIDPanel");
-
-        String meidStr = PhoneFactory.getDefaultPhone().getDeviceId();
+        Phone phone = PhoneGlobals.getPhone();
+        int labelId = TelephonyCapabilities.getDeviceIdLabel(phone);
+        String deviceId = phone.getDeviceId();
 
         AlertDialog alert = new AlertDialog.Builder(context)
-                .setTitle(R.string.meid)
-                .setMessage(meidStr)
+                .setTitle(labelId)
+                .setMessage(deviceId)
                 .setPositiveButton(R.string.ok, null)
                 .setCancelable(false)
-                .show();
+                .create();
         alert.getWindow().setType(WindowManager.LayoutParams.TYPE_PRIORITY_PHONE);
+        alert.show();
     }
 
     private static void log(String msg) {

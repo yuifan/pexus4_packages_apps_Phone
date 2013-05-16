@@ -16,13 +16,14 @@
 
 package com.android.phone;
 
-import android.content.Context;
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.res.Resources;
+import android.os.SystemVibrator;
 import android.os.Vibrator;
-import android.util.Log;
 import android.provider.Settings;
 import android.provider.Settings.System;
+import android.util.Log;
 
 /**
  * Handles the haptic feedback: a light buzz happening when the user
@@ -89,7 +90,9 @@ public class HapticFeedback {
     public void init(Context context, boolean enabled) {
         mEnabled = enabled;
         if (enabled) {
-            mVibrator = new Vibrator();
+            // We don't rely on getSystemService(Context.VIBRATOR_SERVICE) to make sure this
+            // vibrator object will be isolated from others.
+            mVibrator = new SystemVibrator();
             if (!loadHapticSystemPattern(context.getResources())) {
                 mHapticPattern = new long[] {0, DURATION, 2 * DURATION, 3 * DURATION};
             }
@@ -127,7 +130,16 @@ public class HapticFeedback {
         if (!mEnabled || !mSettingEnabled) {
             return;
         }
-        mVibrator.vibrate(mHapticPattern, NO_REPEAT);
+        // System-wide configuration may return different styles of haptic feedback pattern.
+        // - an array with one value implies "one-shot vibration"
+        // - an array with multiple values implies "pattern vibration"
+        // We need to switch methods to call depending on the difference.
+        // See also PhoneWindowManager#performHapticFeedbackLw() for another example.
+        if (mHapticPattern != null && mHapticPattern.length == 1) {
+            mVibrator.vibrate(mHapticPattern[0]);
+        } else {
+            mVibrator.vibrate(mHapticPattern, NO_REPEAT);
+        }
     }
 
     /**

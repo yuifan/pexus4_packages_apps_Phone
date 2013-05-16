@@ -31,6 +31,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.provider.Contacts.PeopleColumns;
 import android.provider.Contacts.PhonesColumns;
+import android.telephony.PhoneNumberUtils;
 import android.text.Selection;
 import android.text.Spannable;
 import android.text.TextUtils;
@@ -50,7 +51,7 @@ import android.widget.Toast;
  * Activity to let the user add or edit an FDN contact.
  */
 public class EditFdnContactScreen extends Activity {
-    private static final String LOG_TAG = PhoneApp.LOG_TAG;
+    private static final String LOG_TAG = PhoneGlobals.LOG_TAG;
     private static final boolean DBG = false;
 
     // Menu item codes
@@ -104,7 +105,7 @@ public class EditFdnContactScreen extends Activity {
         setTitle(mAddContact ?
                 R.string.add_fdn_contact : R.string.edit_fdn_contact);
 
-        mDataBusy = false;
+        displayProgress(false);
     }
 
     /**
@@ -115,8 +116,7 @@ public class EditFdnContactScreen extends Activity {
      * Also, process the results from the contact picker.
      */
     @Override
-    protected void onActivityResult(int requestCode, int resultCode,
-                                    Intent intent) {
+    protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
         if (DBG) log("onActivityResult request:" + requestCode + " result:" + resultCode);
 
         switch (requestCode) {
@@ -261,6 +261,8 @@ public class EditFdnContactScreen extends Activity {
     /**
       * @param number is voice mail number
       * @return true if number length is less than 20-digit limit
+      *
+      * TODO: Fix this logic.
       */
      private boolean isValidNumber(String number) {
          return (number.length() <= 20);
@@ -270,7 +272,9 @@ public class EditFdnContactScreen extends Activity {
     private void addContact() {
         if (DBG) log("addContact");
 
-        if (!isValidNumber(getNumberFromTextField())) {
+        final String number = PhoneNumberUtils.convertAndStrip(getNumberFromTextField());
+
+        if (!isValidNumber(number)) {
             handleResult(false, true);
             return;
         }
@@ -279,9 +283,8 @@ public class EditFdnContactScreen extends Activity {
 
         ContentValues bundle = new ContentValues(3);
         bundle.put("tag", getNameFromTextField());
-        bundle.put("number", getNumberFromTextField());
+        bundle.put("number", number);
         bundle.put("pin2", mPin2);
-
 
         mQueryHandler = new QueryHandler(getContentResolver());
         mQueryHandler.startInsert(0, null, uri, bundle);
@@ -292,7 +295,10 @@ public class EditFdnContactScreen extends Activity {
     private void updateContact() {
         if (DBG) log("updateContact");
 
-        if (!isValidNumber(getNumberFromTextField())) {
+        final String name = getNameFromTextField();
+        final String number = PhoneNumberUtils.convertAndStrip(getNumberFromTextField());
+
+        if (!isValidNumber(number)) {
             handleResult(false, true);
             return;
         }
@@ -301,8 +307,8 @@ public class EditFdnContactScreen extends Activity {
         ContentValues bundle = new ContentValues();
         bundle.put("tag", mName);
         bundle.put("number", mNumber);
-        bundle.put("newTag", getNameFromTextField());
-        bundle.put("newNumber", getNumberFromTextField());
+        bundle.put("newTag", name);
+        bundle.put("newNumber", number);
         bundle.put("pin2", mPin2);
 
         mQueryHandler = new QueryHandler(getContentResolver());
@@ -349,8 +355,8 @@ public class EditFdnContactScreen extends Activity {
      */
     private void showStatus(CharSequence statusMsg) {
         if (statusMsg != null) {
-            Toast.makeText(this, statusMsg, Toast.LENGTH_SHORT)
-            .show();
+            Toast.makeText(this, statusMsg, Toast.LENGTH_LONG)
+                    .show();
         }
     }
 
@@ -361,13 +367,17 @@ public class EditFdnContactScreen extends Activity {
                     R.string.fdn_contact_added : R.string.fdn_contact_updated));
         } else {
             if (DBG) log("handleResult: failed!");
-            if (invalidNumber)
+            if (invalidNumber) {
                 showStatus(getResources().getText(R.string.fdn_invalid_number));
-            else
-                showStatus(getResources().getText(R.string.pin2_invalid));
+            } else {
+                // There's no way to know whether the failure is due to incorrect PIN2 or
+                // an inappropriate phone number.
+                showStatus(getResources().getText(R.string.pin2_or_fdn_invalid));
+            }
         }
 
         mHandler.postDelayed(new Runnable() {
+            @Override
             public void run() {
                 finish();
             }
@@ -375,7 +385,8 @@ public class EditFdnContactScreen extends Activity {
 
     }
 
-    private View.OnClickListener mClicked = new View.OnClickListener() {
+    private final View.OnClickListener mClicked = new View.OnClickListener() {
+        @Override
         public void onClick(View v) {
             if (mPinFieldContainer.getVisibility() != View.VISIBLE) {
                 return;
@@ -395,8 +406,9 @@ public class EditFdnContactScreen extends Activity {
         }
     };
 
-    View.OnFocusChangeListener mOnFocusChangeHandler =
+    private final View.OnFocusChangeListener mOnFocusChangeHandler =
             new View.OnFocusChangeListener() {
+        @Override
         public void onFocusChange(View v, boolean hasFocus) {
             if (hasFocus) {
                 TextView textView = (TextView) v;
@@ -415,8 +427,7 @@ public class EditFdnContactScreen extends Activity {
         }
 
         @Override
-        protected void onInsertComplete(int token, Object cookie,
-                                        Uri uri) {
+        protected void onInsertComplete(int token, Object cookie, Uri uri) {
             if (DBG) log("onInsertComplete");
             displayProgress(false);
             handleResult(uri != null, false);

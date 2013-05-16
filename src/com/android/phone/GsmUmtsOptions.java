@@ -22,6 +22,7 @@ import android.preference.PreferenceActivity;
 import android.preference.PreferenceScreen;
 
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.PhoneFactory;
 
 /**
@@ -37,7 +38,6 @@ public class GsmUmtsOptions {
     private static final String BUTTON_APN_EXPAND_KEY = "button_apn_key";
     private static final String BUTTON_OPERATOR_SELECTION_EXPAND_KEY = "button_carrier_sel_key";
     private static final String BUTTON_PREFER_2G_KEY = "button_prefer_2g_key";
-
     private PreferenceActivity mPrefActivity;
     private PreferenceScreen mPrefScreen;
 
@@ -53,11 +53,20 @@ public class GsmUmtsOptions {
         mButtonOperatorSelectionExpand =
                 (PreferenceScreen) mPrefScreen.findPreference(BUTTON_OPERATOR_SELECTION_EXPAND_KEY);
         mButtonPrefer2g = (CheckBoxPreference) mPrefScreen.findPreference(BUTTON_PREFER_2G_KEY);
-        if (PhoneFactory.getDefaultPhone().getPhoneType() != Phone.PHONE_TYPE_GSM) {
+        if (PhoneFactory.getDefaultPhone().getPhoneType() != PhoneConstants.PHONE_TYPE_GSM) {
             log("Not a GSM phone");
             mButtonAPNExpand.setEnabled(false);
             mButtonOperatorSelectionExpand.setEnabled(false);
             mButtonPrefer2g.setEnabled(false);
+        } else if (mPrefActivity.getResources().getBoolean(R.bool.csp_enabled)) {
+            if (PhoneFactory.getDefaultPhone().isCspPlmnEnabled()) {
+                log("[CSP] Enabling Operator Selection menu.");
+                mButtonOperatorSelectionExpand.setEnabled(true);
+            } else {
+                log("[CSP] Disabling Operator Selection menu.");
+                mPrefScreen.removePreference(mPrefScreen
+                      .findPreference(BUTTON_OPERATOR_SELECTION_EXPAND_KEY));
+            }
         }
     }
 

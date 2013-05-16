@@ -31,13 +31,12 @@ import android.widget.TextView;
 
 import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.Phone;
-import com.android.internal.telephony.PhoneFactory;
 
 /**
  * UI to enable/disable the ICC PIN.
  */
 public class EnableIccPinScreen extends Activity {
-    private static final String LOG_TAG = PhoneApp.LOG_TAG;
+    private static final String LOG_TAG = PhoneGlobals.LOG_TAG;
 
     private static final int ENABLE_ICC_PIN_COMPLETE = 100;
     private static final boolean DBG = false;
@@ -68,7 +67,7 @@ public class EnableIccPinScreen extends Activity {
         setContentView(R.layout.enable_sim_pin_screen);
         setupView();
 
-        mPhone = PhoneFactory.getDefaultPhone();
+        mPhone = PhoneGlobals.getPhone();
         mEnable = !mPhone.getIccCard().getIccLockEnabled();
 
         int id = mEnable ? R.string.enable_sim_pin : R.string.disable_sim_pin;

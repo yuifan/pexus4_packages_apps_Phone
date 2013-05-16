@@ -19,23 +19,24 @@ package com.android.phone;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.ProgressDialog;
-import android.content.ComponentName;
-import android.content.ContentResolver;
+import android.bluetooth.IBluetoothHeadsetPhone;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
-import android.content.ServiceConnection;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.drawable.Drawable;
 import android.media.AudioManager;
 import android.net.Uri;
+import android.net.sip.SipManager;
 import android.os.AsyncResult;
 import android.os.Handler;
-import android.os.IBinder;
 import android.os.Message;
 import android.os.RemoteException;
 import android.os.SystemProperties;
+import android.provider.Settings;
 import android.telephony.PhoneNumberUtils;
 import android.text.TextUtils;
 import android.util.Log;
@@ -47,30 +48,34 @@ import android.widget.EditText;
 import android.widget.Toast;
 
 import com.android.internal.telephony.Call;
+import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.CallStateException;
 import com.android.internal.telephony.CallerInfo;
 import com.android.internal.telephony.CallerInfoAsyncQuery;
 import com.android.internal.telephony.Connection;
-import com.android.internal.telephony.IExtendedNetworkService;
 import com.android.internal.telephony.MmiCode;
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.PhoneConstants;
+import com.android.internal.telephony.TelephonyCapabilities;
 import com.android.internal.telephony.TelephonyProperties;
 import com.android.internal.telephony.cdma.CdmaConnection;
-import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.sip.SipPhone;
 
-
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Hashtable;
 import java.util.Iterator;
 import java.util.List;
-import java.util.ArrayList;
 
 /**
  * Misc utilities for the Phone app.
  */
 public class PhoneUtils {
     private static final String LOG_TAG = "PhoneUtils";
-    private static final boolean DBG = (PhoneApp.DBG_LEVEL >= 2);
+    private static final boolean DBG = (PhoneGlobals.DBG_LEVEL >= 2);
+
+    // Do not check in with VDBG = true, since that may write PII to the system log.
+    private static final boolean VDBG = false;
 
     /** Control stack trace for Audio Mode settings */
     private static final boolean DBG_SETAUDIOMODE_STACK = false;
@@ -90,6 +95,10 @@ public class PhoneUtils {
     static final int AUDIO_RINGING = 1;  /** audio behaviour while ringing */
     static final int AUDIO_OFFHOOK = 2;  /** audio behaviour while in call. */
 
+    // USSD string length for MMI operations
+    static final int MIN_USSD_LEN = 1;
+    static final int MAX_USSD_LEN = 160;
+
     /** Speaker state, persisting between wired headset connection events */
     private static boolean sIsSpeakerEnabled = false;
 
@@ -105,11 +114,6 @@ public class PhoneUtils {
 
     /** Define for not a special CNAP string */
     private static final int CNAP_SPECIAL_CASE_NO = -1;
-
-    // Extended network service interface instance
-    private static IExtendedNetworkService mNwService = null;
-    // used to cancel MMI command after 15 seconds timeout for NWService requirement
-    private static Message mMmiTimeoutCbMsg = null;
 
     /** Noise suppression status as selected by user */
     private static boolean sIsNoiseSuppressionEnabled = true;
@@ -168,7 +172,7 @@ public class PhoneUtils {
                             cnlist.hasNext();) {
                         cn = cnlist.next();
                         if (!fgConnections.contains(cn) && !bgConnections.contains(cn)) {
-                            if (DBG) log("connection: " + cn + "not accounted for, removing.");
+                            if (DBG) log("connection '" + cn + "' not accounted for, removing.");
                             cnlist.remove();
                         }
                     }
@@ -179,7 +183,7 @@ public class PhoneUtils {
                     // the mute state with the earliest connection on the foreground
                     // call, and that with no connections, we should be back to a
                     // non-mute state.
-                    if (cm.getState() != Phone.State.IDLE) {
+                    if (cm.getState() != PhoneConstants.State.IDLE) {
                         restoreMuteState();
                     } else {
                         setMuteInternal(cm.getFgPhone(), false);
@@ -189,19 +193,6 @@ public class PhoneUtils {
             }
         }
     }
-
-
-    private static ServiceConnection ExtendedNetworkServiceConnection = new ServiceConnection() {
-        public void onServiceConnected(ComponentName name, IBinder iBinder) {
-            if (DBG) log("Extended NW onServiceConnected");
-            mNwService = IExtendedNetworkService.Stub.asInterface(iBinder);
-        }
-
-        public void onServiceDisconnected(ComponentName arg0) {
-            if (DBG) log("Extended NW onServiceDisconnected");
-            mNwService = null;
-        }
-    };
 
     /**
      * Register the ConnectionHandler with the phone, to receive connection events
@@ -213,11 +204,6 @@ public class PhoneUtils {
 
         // pass over cm as user.obj
         cm.registerForPreciseCallStateChanged(mConnectionHandler, PHONE_STATE_CHANGED, cm);
-        // Extended NW service
-        Intent intent = new Intent("com.android.ussd.IExtendedNetworkService");
-        cm.getDefaultPhone().getContext().bindService(intent,
-                ExtendedNetworkServiceConnection, Context.BIND_AUTO_CREATE);
-        if (DBG) log("Extended NW bindService IExtendedNetworkService");
 
     }
 
@@ -231,32 +217,32 @@ public class PhoneUtils {
      * @return true if we answered the call, or false if there wasn't
      *         actually a ringing incoming call, or some other error occurred.
      *
-     * @see answerAndEndHolding()
-     * @see answerAndEndActive()
+     * @see #answerAndEndHolding(CallManager, Call)
+     * @see #answerAndEndActive(CallManager, Call)
      */
-    static boolean answerCall(Call ringing) {
-        if (DBG) log("answerCall()...");
+    /* package */ static boolean answerCall(Call ringingCall) {
+        log("answerCall(" + ringingCall + ")...");
+        final PhoneGlobals app = PhoneGlobals.getInstance();
+        final CallNotifier notifier = app.notifier;
 
         // If the ringer is currently ringing and/or vibrating, stop it
         // right now (before actually answering the call.)
-        PhoneApp.getInstance().getRinger().stopRing();
+        notifier.silenceRinger();
 
+        final Phone phone = ringingCall.getPhone();
+        final boolean phoneIsCdma = (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA);
         boolean answered = false;
-        PhoneApp app = PhoneApp.getInstance();
-        Phone phone = ringing.getPhone();
-        boolean phoneIsCdma = (phone.getPhoneType() == Phone.PHONE_TYPE_CDMA);
-        BluetoothHandsfree bthf = null;
+        IBluetoothHeadsetPhone btPhone = null;
 
         if (phoneIsCdma) {
             // Stop any signalInfo tone being played when a Call waiting gets answered
-            if (ringing.getState() == Call.State.WAITING) {
-                final CallNotifier notifier = app.notifier;
+            if (ringingCall.getState() == Call.State.WAITING) {
                 notifier.stopSignalInfoTone();
             }
         }
 
-        if (ringing != null && ringing.isRinging()) {
-            if (DBG) log("answerCall: call state = " + ringing.getState());
+        if (ringingCall != null && ringingCall.isRinging()) {
+            if (DBG) log("answerCall: call state = " + ringingCall.getState());
             try {
                 if (phoneIsCdma) {
                     if (app.cdmaPhoneCallState.getCurrentCallState()
@@ -275,18 +261,24 @@ public class PhoneUtils {
                         // drops off
                         app.cdmaPhoneCallState.setAddCallMenuStateAfterCallWaiting(true);
 
-                        // If a BluetoothHandsfree is valid we need to set the second call state
+                        // If a BluetoothPhoneService is valid we need to set the second call state
                         // so that the Bluetooth client can update the Call state correctly when
                         // a call waiting is answered from the Phone.
-                        bthf = app.getBluetoothHandsfree();
-                        if (bthf != null) {
-                            bthf.cdmaSetSecondCallState(true);
+                        btPhone = app.getBluetoothPhoneService();
+                        if (btPhone != null) {
+                            try {
+                                btPhone.cdmaSetSecondCallState(true);
+                            } catch (RemoteException e) {
+                                Log.e(LOG_TAG, Log.getStackTraceString(new Throwable()));
+                            }
                         }
-                    }
+                  }
                 }
 
+                final boolean isRealIncomingCall = isRealIncomingCall(ringingCall.getState());
+
                 //if (DBG) log("sPhone.acceptCall");
-                PhoneApp.getInstance().mCM.acceptCall(ringing);
+                app.mCM.acceptCall(ringingCall);
                 answered = true;
 
                 // Always reset to "unmuted" for a freshly-answered call
@@ -295,16 +287,35 @@ public class PhoneUtils {
                 setAudioMode();
 
                 // Check is phone in any dock, and turn on speaker accordingly
-                activateSpeakerIfDocked(phone);
+                final boolean speakerActivated = activateSpeakerIfDocked(phone);
+
+                // When answering a phone call, the user will move the phone near to her/his ear
+                // and start conversation, without checking its speaker status. If some other
+                // application turned on the speaker mode before the call and didn't turn it off,
+                // Phone app would need to be responsible for the speaker phone.
+                // Here, we turn off the speaker if
+                // - the phone call is the first in-coming call,
+                // - we did not activate speaker by ourselves during the process above, and
+                // - Bluetooth headset is not in use.
+                if (isRealIncomingCall && !speakerActivated && isSpeakerOn(app)
+                        && !app.isBluetoothHeadsetAudioOn()) {
+                    // This is not an error but might cause users' confusion. Add log just in case.
+                    Log.i(LOG_TAG, "Forcing speaker off due to new incoming call...");
+                    turnOnSpeaker(app, false, true);
+                }
             } catch (CallStateException ex) {
                 Log.w(LOG_TAG, "answerCall: caught " + ex, ex);
 
                 if (phoneIsCdma) {
-                    // restore the cdmaPhoneCallState and bthf.cdmaSetSecondCallState:
+                    // restore the cdmaPhoneCallState and btPhone.cdmaSetSecondCallState:
                     app.cdmaPhoneCallState.setCurrentCallState(
                             app.cdmaPhoneCallState.getPreviousCallState());
-                    if (bthf != null) {
-                        bthf.cdmaSetSecondCallState(false);
+                    if (btPhone != null) {
+                        try {
+                            btPhone.cdmaSetSecondCallState(false);
+                        } catch (RemoteException e) {
+                            Log.e(LOG_TAG, Log.getStackTraceString(new Throwable()));
+                        }
                     }
                 }
             }
@@ -331,17 +342,23 @@ public class PhoneUtils {
         Call bg = cm.getFirstActiveBgCall();
 
         if (!ringing.isIdle()) {
-            if (DBG) log("HANGUP ringing call");
+            log("hangup(): hanging up ringing call");
             hungup = hangupRingingCall(ringing);
         } else if (!fg.isIdle()) {
-            if (DBG) log("HANGUP foreground call");
+            log("hangup(): hanging up foreground call");
             hungup = hangup(fg);
         } else if (!bg.isIdle()) {
-            if (DBG) log("HANGUP background call");
+            log("hangup(): hanging up background call");
             hungup = hangup(bg);
+        } else {
+            // No call to hang up!  This is unlikely in normal usage,
+            // since the UI shouldn't be providing an "End call" button in
+            // the first place.  (But it *can* happen, rarely, if an
+            // active call happens to disconnect on its own right when the
+            // user is trying to hang up..)
+            log("hangup(): no active call to hang up");
         }
-
-        if (DBG) log("hungup=" + hungup);
+        if (DBG) log("==> hungup = " + hungup);
 
         return hungup;
     }
@@ -349,35 +366,41 @@ public class PhoneUtils {
     static boolean hangupRingingCall(Call ringing) {
         if (DBG) log("hangup ringing call");
         int phoneType = ringing.getPhone().getPhoneType();
+        Call.State state = ringing.getState();
 
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
-            // CDMA: Ringing call and Call waiting hangup is handled differently.
-            // For Call waiting we DO NOT call the conventional hangup(call) function
-            // as in CDMA we just want to hungup the Call waiting connection.
-            Call.State state = ringing.getState();
-            if (state == Call.State.INCOMING) {
-                if (DBG) log("hangup ringing call");
-                return hangup(ringing);
-            } else if (state == Call.State.WAITING) {
-                if (DBG) log("hangup Call waiting call");
-                final CallNotifier notifier = PhoneApp.getInstance().notifier;
+        if (state == Call.State.INCOMING) {
+            // Regular incoming call (with no other active calls)
+            log("hangupRingingCall(): regular incoming call: hangup()");
+            return hangup(ringing);
+        } else if (state == Call.State.WAITING) {
+            // Call-waiting: there's an incoming call, but another call is
+            // already active.
+            // TODO: It would be better for the telephony layer to provide
+            // a "hangupWaitingCall()" API that works on all devices,
+            // rather than us having to check the phone type here and do
+            // the notifier.sendCdmaCallWaitingReject() hack for CDMA phones.
+            if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+                // CDMA: Ringing call and Call waiting hangup is handled differently.
+                // For Call waiting we DO NOT call the conventional hangup(call) function
+                // as in CDMA we just want to hangup the Call waiting connection.
+                log("hangupRingingCall(): CDMA-specific call-waiting hangup");
+                final CallNotifier notifier = PhoneGlobals.getInstance().notifier;
                 notifier.sendCdmaCallWaitingReject();
                 return true;
             } else {
-                // This should never happen cause hangupRingingCall should always be called
-                // if the call.isRinging() returns TRUE, which basically means that the call
-                // should either be in INCOMING or WAITING state
-                if (DBG) log("No Ringing call to hangup");
-                return false;
+                // Otherwise, the regular hangup() API works for
+                // call-waiting calls too.
+                log("hangupRingingCall(): call-waiting call: hangup()");
+                return hangup(ringing);
             }
-        } else if ((phoneType == Phone.PHONE_TYPE_GSM)
-                || (phoneType == Phone.PHONE_TYPE_SIP)) {
-            // GSM:  Ringing Call and Call waiting, both are hungup by calling
-            // hangup(call) function.
-            if (DBG) log("hangup ringing call");
-            return hangup(ringing);
         } else {
-            throw new IllegalStateException("Unexpected phone type: " + phoneType);
+            // Unexpected state: the ringing call isn't INCOMING or
+            // WAITING, so there's no reason to have called
+            // hangupRingingCall() in the first place.
+            // (Presumably the incoming call went away at the exact moment
+            // we got here, so just do nothing.)
+            Log.w(LOG_TAG, "hangupRingingCall: no INCOMING or WAITING call");
+            return false;
         }
     }
 
@@ -404,13 +427,13 @@ public class PhoneUtils {
 
         // Hang up any Ringing Call
         if (!ringingCall.isIdle()) {
-            if (DBG) log("endCallInternal: Hang up Ringing Call");
+            log("hangupRingingAndActive: Hang up Ringing Call");
             hungUpRingingCall = hangupRingingCall(ringingCall);
         }
 
         // Hang up any Active Call
         if (!fgCall.isIdle()) {
-            if (DBG) log("endCallInternal: Hang up Foreground Call");
+            log("hangupRingingAndActive: Hang up Foreground Call");
             hungUpFgCall = hangupActiveCall(fgCall);
         }
 
@@ -427,12 +450,14 @@ public class PhoneUtils {
      */
     static boolean hangup(Call call) {
         try {
-            CallManager cm = PhoneApp.getInstance().mCM;
+            CallManager cm = PhoneGlobals.getInstance().mCM;
 
             if (call.getState() == Call.State.ACTIVE && cm.hasActiveBgCall()) {
                 // handle foreground call hangup while there is background call
+                log("- hangup(Call): hangupForegroundResumeBackground...");
                 cm.hangupForegroundResumeBackground(cm.getFirstActiveBgCall());
             } else {
+                log("- hangup(Call): regular hangup()...");
                 call.hangup();
             }
             return true;
@@ -470,7 +495,20 @@ public class PhoneUtils {
 
     }
 
-    static boolean answerAndEndActive(CallManager cm, Call ringing) {
+    /**
+     * Answers the incoming call specified by "ringing", and ends the currently active phone call.
+     *
+     * This method is useful when's there's an incoming call which we cannot manage with the
+     * current call. e.g. when you are having a phone call with CDMA network and has received
+     * a SIP call, then we won't expect our telephony can manage those phone calls simultaneously.
+     * Note that some types of network may allow multiple phone calls at once; GSM allows to hold
+     * an ongoing phone call, so we don't need to end the active call. The caller of this method
+     * needs to check if the network allows multiple phone calls or not.
+     *
+     * @see #answerCall(Call)
+     * @see InCallScreen#internalAnswerCall()
+     */
+    /* package */ static boolean answerAndEndActive(CallManager cm, Call ringing) {
         if (DBG) log("answerAndEndActive()...");
 
         // Unlike the answerCall() method, we *don't* need to stop the
@@ -482,7 +520,7 @@ public class PhoneUtils {
         // hanging up the active call also accepts the waiting call
         // while active call and waiting call are from the same phone
         // i.e. both from GSM phone
-        if ( !hangupActiveCall(cm.getActiveFgCall())) {
+        if (!hangupActiveCall(cm.getActiveFgCall())) {
             Log.w(LOG_TAG, "end active call failed!");
             return false;
         }
@@ -508,7 +546,7 @@ public class PhoneUtils {
      * </pre>
      * @param app The phone instance.
      */
-    private static void updateCdmaCallStateOnNewOutgoingCall(PhoneApp app) {
+    private static void updateCdmaCallStateOnNewOutgoingCall(PhoneGlobals app) {
         if (app.cdmaPhoneCallState.getCurrentCallState() ==
             CdmaPhoneCallState.PhoneCallState.IDLE) {
             // This is the first outgoing call. Set the Phone Call State to ACTIVE
@@ -524,170 +562,191 @@ public class PhoneUtils {
     /**
      * Dial the number using the phone passed in.
      *
-     * @param phone the Phone object.
-     * @param number to be dialed as requested by the user.
-     * @param contactRef that triggered the call. Either a 'tel:' or a
-     * 'content://contacts' uri depending on how the call was
-     * initiated (dialpad vs contact).
-     * @return either CALL_STATUS_DIALED, CALL_STATUS_DIALED_MMI, or CALL_STATUS_FAILED
-     */
-    static int placeCall(Phone phone, String number, Uri contactRef) {
-        int status = CALL_STATUS_DIALED;
-        try {
-            if (DBG) log("placeCall: '" + number + "'...");
-
-            Connection cn = PhoneApp.getInstance().mCM.dial(phone, number);
-            if (DBG) log("===> phone.dial() returned: " + cn);
-
-            int phoneType = phone.getPhoneType();
-
-            // On GSM phones, null is returned for MMI codes
-            if (cn == null) {
-                if (phoneType == Phone.PHONE_TYPE_GSM) {
-                    if (DBG) log("dialed MMI code: " + number);
-                    status = CALL_STATUS_DIALED_MMI;
-                    // Set dialed MMI command to service
-                    if (mNwService != null) {
-                        try {
-                            mNwService.setMmiString(number);
-                            if (DBG) log("Extended NW bindService setUssdString (" + number + ")");
-                        } catch (RemoteException e) {
-                            mNwService = null;
-                        }
-                    }
-                } else {
-                    status = PhoneUtils.CALL_STATUS_FAILED;
-                }
-            } else {
-                PhoneApp app = PhoneApp.getInstance();
-
-                if (phoneType == Phone.PHONE_TYPE_CDMA) {
-                    updateCdmaCallStateOnNewOutgoingCall(app);
-                }
-
-                // phone.dial() succeeded: we're now in a normal phone call.
-                // attach the URI to the CallerInfo Object if it is there,
-                // otherwise just attach the Uri Reference.
-                // if the uri does not have a "content" scheme, then we treat
-                // it as if it does NOT have a unique reference.
-                String content = phone.getContext().getContentResolver().SCHEME_CONTENT;
-                if ((contactRef != null) && (contactRef.getScheme().equals(content))) {
-                    Object userDataObject = cn.getUserData();
-                    if (userDataObject == null) {
-                        cn.setUserData(contactRef);
-                    } else {
-                        // TODO: This branch is dead code, we have
-                        // just created the connection 'cn' which has
-                        // no user data (null) by default.
-                        if (userDataObject instanceof CallerInfo) {
-                            ((CallerInfo) userDataObject).contactRefUri = contactRef;
-                        } else {
-                            ((CallerInfoToken) userDataObject).currentInfo.contactRefUri =
-                                contactRef;
-                        }
-                    }
-                }
-                setAudioMode();
-
-                // Check is phone in any dock, and turn on speaker accordingly
-                activateSpeakerIfDocked(phone);
-            }
-        } catch (CallStateException ex) {
-            Log.w(LOG_TAG, "Exception from phone.dial()", ex);
-            status = CALL_STATUS_FAILED;
-        }
-
-        return status;
-    }
-
-    /**
-     * Dial the number using a 3rd party provider gateway.  Should
-     * *NOT* be called if the number is either:
-     * . An emergency one
-     * . A GSM MMI code
-     * . A CDMA feature code
-     * None of the above is  checked in this method, it's the caller's
-     * responsability to make sure the number is 'valid'.
-     *
      * If the connection is establised, this method issues a sync call
      * that may block to query the caller info.
      * TODO: Change the logic to use the async query.
      *
-     * @param phone the Phone object.
      * @param context To perform the CallerInfo query.
+     * @param phone the Phone object.
      * @param number to be dialed as requested by the user. This is
      * NOT the phone number to connect to. It is used only to build the
      * call card and to update the call log. See above for restrictions.
      * @param contactRef that triggered the call. Typically a 'tel:'
      * uri but can also be a 'content://contacts' one.
-     * @param gatewayUri Is the address used to setup the connection.
+     * @param isEmergencyCall indicates that whether or not this is an
+     * emergency call
+     * @param gatewayUri Is the address used to setup the connection, null
+     * if not using a gateway
+     *
      * @return either CALL_STATUS_DIALED or CALL_STATUS_FAILED
      */
-    static int placeCallVia(Context context, Phone phone,
-                            String number, Uri contactRef, Uri gatewayUri) {
-        if (DBG) log("placeCallVia: '" + number + "' GW:'" + gatewayUri + "'");
+    public static int placeCall(Context context, Phone phone,
+            String number, Uri contactRef, boolean isEmergencyCall,
+            Uri gatewayUri) {
+        if (VDBG) {
+            log("placeCall()... number: '" + number + "'"
+                    + ", GW:'" + gatewayUri + "'"
+                    + ", contactRef:" + contactRef
+                    + ", isEmergencyCall: " + isEmergencyCall);
+        } else {
+            log("placeCall()... number: " + toLogSafePhoneNumber(number)
+                    + ", GW: " + (gatewayUri != null ? "non-null" : "null")
+                    + ", emergency? " + isEmergencyCall);
+        }
+        final PhoneGlobals app = PhoneGlobals.getInstance();
 
-        // TODO: 'tel' should be a contant defined in framework base
-        // somewhere (it is in webkit.)
-        if (null == gatewayUri || !"tel".equals(gatewayUri.getScheme())) {
-            Log.e(LOG_TAG, "Unsupported URL:" + gatewayUri);
-            return CALL_STATUS_FAILED;
+        boolean useGateway = false;
+        if (null != gatewayUri &&
+            !isEmergencyCall &&
+            PhoneUtils.isRoutableViaGateway(number)) {  // Filter out MMI, OTA and other codes.
+            useGateway = true;
         }
 
-        // We can use getSchemeSpecificPart because we don't allow #
-        // in the gateway numbers (treated a fragment delim.) However
-        // if we allow more complex gateway numbers sequence (with
-        // passwords or whatnot) that use #, this may break.
-        // TODO: Need to support MMI codes.
-        String gatewayNumber = gatewayUri.getSchemeSpecificPart();
+        int status = CALL_STATUS_DIALED;
         Connection connection;
+        String numberToDial;
+        if (useGateway) {
+            // TODO: 'tel' should be a constant defined in framework base
+            // somewhere (it is in webkit.)
+            if (null == gatewayUri || !Constants.SCHEME_TEL.equals(gatewayUri.getScheme())) {
+                Log.e(LOG_TAG, "Unsupported URL:" + gatewayUri);
+                return CALL_STATUS_FAILED;
+            }
+
+            // We can use getSchemeSpecificPart because we don't allow #
+            // in the gateway numbers (treated a fragment delim.) However
+            // if we allow more complex gateway numbers sequence (with
+            // passwords or whatnot) that use #, this may break.
+            // TODO: Need to support MMI codes.
+            numberToDial = gatewayUri.getSchemeSpecificPart();
+        } else {
+            numberToDial = number;
+        }
+
+        // Remember if the phone state was in IDLE state before this call.
+        // After calling CallManager#dial(), getState() will return different state.
+        final boolean initiallyIdle = app.mCM.getState() == PhoneConstants.State.IDLE;
+
         try {
-            connection = PhoneApp.getInstance().mCM.dial(phone, gatewayNumber);
+            connection = app.mCM.dial(phone, numberToDial);
         } catch (CallStateException ex) {
-            Log.e(LOG_TAG, "Exception dialing gateway", ex);
-            connection = null;
-        }
-
-        if (null == connection) {
-            Log.e(LOG_TAG, "Got null connection.");
+            // CallStateException means a new outgoing call is not currently
+            // possible: either no more call slots exist, or there's another
+            // call already in the process of dialing or ringing.
+            Log.w(LOG_TAG, "Exception from app.mCM.dial()", ex);
             return CALL_STATUS_FAILED;
+
+            // Note that it's possible for CallManager.dial() to return
+            // null *without* throwing an exception; that indicates that
+            // we dialed an MMI (see below).
         }
 
-        PhoneApp app = PhoneApp.getInstance();
-        boolean phoneIsCdma = (phone.getPhoneType() == Phone.PHONE_TYPE_CDMA);
+        int phoneType = phone.getPhoneType();
 
-        if (phoneIsCdma) {
-            updateCdmaCallStateOnNewOutgoingCall(app);
+        // On GSM phones, null is returned for MMI codes
+        if (null == connection) {
+            if (phoneType == PhoneConstants.PHONE_TYPE_GSM && gatewayUri == null) {
+                if (DBG) log("dialed MMI code: " + number);
+                status = CALL_STATUS_DIALED_MMI;
+            } else {
+                status = CALL_STATUS_FAILED;
+            }
+        } else {
+            if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+                updateCdmaCallStateOnNewOutgoingCall(app);
+            }
+
+            // Clean up the number to be displayed.
+            if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+                number = CdmaConnection.formatDialString(number);
+            }
+            number = PhoneNumberUtils.extractNetworkPortion(number);
+            number = PhoneNumberUtils.convertKeypadLettersToDigits(number);
+            number = PhoneNumberUtils.formatNumber(number);
+
+            if (gatewayUri == null) {
+                // phone.dial() succeeded: we're now in a normal phone call.
+                // attach the URI to the CallerInfo Object if it is there,
+                // otherwise just attach the Uri Reference.
+                // if the uri does not have a "content" scheme, then we treat
+                // it as if it does NOT have a unique reference.
+                String content = context.getContentResolver().SCHEME_CONTENT;
+                if ((contactRef != null) && (contactRef.getScheme().equals(content))) {
+                    Object userDataObject = connection.getUserData();
+                    if (userDataObject == null) {
+                        connection.setUserData(contactRef);
+                    } else {
+                        // TODO: This branch is dead code, we have
+                        // just created the connection which has
+                        // no user data (null) by default.
+                        if (userDataObject instanceof CallerInfo) {
+                        ((CallerInfo) userDataObject).contactRefUri = contactRef;
+                        } else {
+                        ((CallerInfoToken) userDataObject).currentInfo.contactRefUri =
+                            contactRef;
+                        }
+                    }
+                }
+            } else {
+                // Get the caller info synchronously because we need the final
+                // CallerInfo object to update the dialed number with the one
+                // requested by the user (and not the provider's gateway number).
+                CallerInfo info = null;
+                String content = phone.getContext().getContentResolver().SCHEME_CONTENT;
+                if ((contactRef != null) && (contactRef.getScheme().equals(content))) {
+                    info = CallerInfo.getCallerInfo(context, contactRef);
+                }
+
+                // Fallback, lookup contact using the phone number if the
+                // contact's URI scheme was not content:// or if is was but
+                // the lookup failed.
+                if (null == info) {
+                    info = CallerInfo.getCallerInfo(context, number);
+                }
+                info.phoneNumber = number;
+                connection.setUserData(info);
+            }
+            setAudioMode();
+
+            if (DBG) log("about to activate speaker");
+            // Check is phone in any dock, and turn on speaker accordingly
+            final boolean speakerActivated = activateSpeakerIfDocked(phone);
+
+            // See also similar logic in answerCall().
+            if (initiallyIdle && !speakerActivated && isSpeakerOn(app)
+                    && !app.isBluetoothHeadsetAudioOn()) {
+                // This is not an error but might cause users' confusion. Add log just in case.
+                Log.i(LOG_TAG, "Forcing speaker off when initiating a new outgoing call...");
+                PhoneUtils.turnOnSpeaker(app, false, true);
+            }
         }
 
-        // Clean up the number to be displayed.
-        if (phoneIsCdma) {
-            number = CdmaConnection.formatDialString(number);
-        }
-        number = PhoneNumberUtils.extractNetworkPortion(number);
-        number = PhoneNumberUtils.convertKeypadLettersToDigits(number);
-        number = PhoneNumberUtils.formatNumber(number);
+        return status;
+    }
 
-        // Get the caller info synchronously because we need the final
-        // CallerInfo object to update the dialed number with the one
-        // requested by the user (and not the provider's gateway number).
-        CallerInfo info = null;
-
-        if (ContentResolver.SCHEME_CONTENT.equals(contactRef.getScheme())) {
-            info = CallerInfo.getCallerInfo(context, contactRef);
+    private static String toLogSafePhoneNumber(String number) {
+        // For unknown number, log empty string.
+        if (number == null) {
+            return "";
         }
 
-        // Fallback, lookup contact using the phone number if the
-        // contact's URI scheme was not content:// or if is was but
-        // the lookup failed.
-        if (null == info) {
-            info = CallerInfo.getCallerInfo(context, number);
+        if (VDBG) {
+            // When VDBG is true we emit PII.
+            return number;
         }
-        info.phoneNumber = number;
-        connection.setUserData(info);
 
-        setAudioMode();
-        return CALL_STATUS_DIALED;
+        // Do exactly same thing as Uri#toSafeString() does, which will enable us to compare
+        // sanitized phone numbers.
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < number.length(); i++) {
+            char c = number.charAt(i);
+            if (c == '-' || c == '@' || c == '.') {
+                builder.append(c);
+            } else {
+                builder.append('x');
+            }
+        }
+        return builder.toString();
     }
 
     /**
@@ -696,7 +755,7 @@ public class PhoneUtils {
      * to the network prior to placing a 3-way call for it to be successful.
      */
     static void sendEmptyFlash(Phone phone) {
-        if (phone.getPhoneType() == Phone.PHONE_TYPE_CDMA) {
+        if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA) {
             Call fgCall = phone.getForegroundCall();
             if (fgCall.getState() == Call.State.ACTIVE) {
                 // Send the empty flash
@@ -710,9 +769,9 @@ public class PhoneUtils {
      * @param heldCall is the background call want to be swapped
      */
     static void switchHoldingAndActive(Call heldCall) {
+        log("switchHoldingAndActive()...");
         try {
-            if (DBG) log("switchHoldingAndActive");
-            CallManager cm = PhoneApp.getInstance().mCM;
+            CallManager cm = PhoneGlobals.getInstance().mCM;
             if (heldCall.isIdle()) {
                 // no heldCall, so it is to hold active call
                 cm.switchHoldingAndActive(cm.getFgPhone().getBackgroundCall());
@@ -731,7 +790,7 @@ public class PhoneUtils {
      * foreground call.
      */
     static Boolean restoreMuteState() {
-        Phone phone = PhoneApp.getInstance().mCM.getFgPhone();
+        Phone phone = PhoneGlobals.getInstance().mCM.getFgPhone();
 
         //get the earliest connection
         Connection c = phone.getForegroundCall().getEarliestConnection();
@@ -748,11 +807,11 @@ public class PhoneUtils {
             // a call where  call can have multiple connections such as
             // Three way and Call Waiting.  Therefore retrieving Mute state for
             // latest connection can apply for all connection in that call
-            if (phoneType == Phone.PHONE_TYPE_CDMA) {
+            if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
                 shouldMute = sConnectionMuteTable.get(
                         phone.getForegroundCall().getLatestConnection());
-            } else if ((phoneType == Phone.PHONE_TYPE_GSM)
-                    || (phoneType == Phone.PHONE_TYPE_SIP)) {
+            } else if ((phoneType == PhoneConstants.PHONE_TYPE_GSM)
+                    || (phoneType == PhoneConstants.PHONE_TYPE_SIP)) {
                 shouldMute = sConnectionMuteTable.get(c);
             }
             if (shouldMute == null) {
@@ -768,14 +827,14 @@ public class PhoneUtils {
     }
 
     static void mergeCalls() {
-        mergeCalls(PhoneApp.getInstance().mCM);
+        mergeCalls(PhoneGlobals.getInstance().mCM);
     }
 
     static void mergeCalls(CallManager cm) {
         int phoneType = cm.getFgPhone().getPhoneType();
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
-            if (DBG) log("mergeCalls");
-            PhoneApp app = PhoneApp.getInstance();
+        if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+            log("mergeCalls(): CDMA...");
+            PhoneGlobals app = PhoneGlobals.getInstance();
             if (app.cdmaPhoneCallState.getCurrentCallState()
                     == CdmaPhoneCallState.PhoneCallState.THRWAY_ACTIVE) {
                 // Set the Phone Call State to conference
@@ -786,11 +845,12 @@ public class PhoneUtils {
                 // TODO: Need to change the call from switchHoldingAndActive to
                 // something meaningful as we are not actually trying to swap calls but
                 // instead are merging two calls by sending a Flash command.
+                log("- sending flash...");
                 switchHoldingAndActive(cm.getFirstActiveBgCall());
             }
         } else {
             try {
-                if (DBG) log("mergeCalls");
+                log("mergeCalls(): calling cm.conference()...");
                 cm.conference(cm.getFirstActiveBgCall());
             } catch (CallStateException ex) {
                 Log.w(LOG_TAG, "mergeCalls: caught " + ex, ex);
@@ -800,7 +860,7 @@ public class PhoneUtils {
 
     static void separateCall(Connection c) {
         try {
-            if (DBG) log("separateCall: " + c.getAddress());
+            if (DBG) log("separateCall: " + toLogSafePhoneNumber(c.getAddress()));
             c.separate();
         } catch (CallStateException ex) {
             Log.w(LOG_TAG, "separateCall: caught " + ex, ex);
@@ -854,35 +914,6 @@ public class PhoneUtils {
         //
         // Anything that is NOT a USSD request is a normal MMI request,
         // which will bring up a toast (desribed above).
-        // Optional code for Extended USSD running prompt
-        if (mNwService != null) {
-            if (DBG) log("running USSD code, displaying indeterminate progress.");
-            // create the indeterminate progress dialog and display it.
-            ProgressDialog pd = new ProgressDialog(context);
-            CharSequence textmsg = "";
-            try {
-                textmsg = mNwService.getMmiRunningText();
-
-            } catch (RemoteException e) {
-                mNwService = null;
-                textmsg = context.getText(R.string.ussdRunning);
-            }
-            if (DBG) log("Extended NW displayMMIInitiate (" + textmsg+ ")");
-            pd.setMessage(textmsg);
-            pd.setCancelable(false);
-            pd.setIndeterminate(true);
-            pd.getWindow().addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            pd.getWindow().setType(WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG);
-            pd.show();
-            // trigger a 15 seconds timeout to clear this progress dialog
-            mMmiTimeoutCbMsg = buttonCallbackMessage;
-            try {
-                mMmiTimeoutCbMsg.getTarget().sendMessageDelayed(buttonCallbackMessage, 15000);
-            } catch(NullPointerException e) {
-                mMmiTimeoutCbMsg = null;
-            }
-            return pd;
-        }
 
         boolean isCancelable = (mmiCode != null) && mmiCode.isCancelable();
 
@@ -920,21 +951,12 @@ public class PhoneUtils {
     static void displayMMIComplete(final Phone phone, Context context, final MmiCode mmiCode,
             Message dismissCallbackMessage,
             AlertDialog previousAlert) {
+        final PhoneGlobals app = PhoneGlobals.getInstance();
         CharSequence text;
         int title = 0;  // title for the progress dialog, if needed.
         MmiCode.State state = mmiCode.getState();
 
         if (DBG) log("displayMMIComplete: state=" + state);
-        // Clear timeout trigger message
-        if(mMmiTimeoutCbMsg != null) {
-            try{
-                mMmiTimeoutCbMsg.getTarget().removeMessages(mMmiTimeoutCbMsg.what);
-                if (DBG) log("Extended NW displayMMIComplete removeMsg");
-            } catch (NullPointerException e) {
-            }
-            mMmiTimeoutCbMsg = null;
-        }
-
 
         switch (state) {
             case PENDING:
@@ -943,10 +965,10 @@ public class PhoneUtils {
                 if (DBG) log("- using text from PENDING MMI message: '" + text + "'");
                 break;
             case CANCELLED:
-                text = context.getText(R.string.mmiCancelled);
+                text = null;
                 break;
             case COMPLETE:
-                if (PhoneApp.getInstance().getPUKEntryActivity() != null) {
+                if (app.getPUKEntryActivity() != null) {
                     // if an attempt to unPUK the device was made, we specify
                     // the title and the message here.
                     title = com.android.internal.R.string.PinMmi;
@@ -971,7 +993,6 @@ public class PhoneUtils {
 
         // Check to see if a UI exists for the PUK activation.  If it does
         // exist, then it indicates that we're trying to unblock the PUK.
-        PhoneApp app = PhoneApp.getInstance();
         if ((app.getPUKEntryActivity() != null) && (state == MmiCode.State.COMPLETE)) {
             if (DBG) log("displaying PUK unblocking progress dialog.");
 
@@ -1004,17 +1025,9 @@ public class PhoneUtils {
             if (state != MmiCode.State.PENDING) {
                 if (DBG) log("MMI code has finished running.");
 
-                // Replace response message with Extended Mmi wording
-                if (mNwService != null) {
-                    try {
-                        text = mNwService.getUserMessage(text);
-                    } catch (RemoteException e) {
-                        mNwService = null;
-                    }
-                    if (DBG) log("Extended NW displayMMIInitiate (" + text + ")");
-                    if (text == null || text.length() == 0)
-                        return;
-                }
+                if (DBG) log("Extended NW displayMMIInitiate (" + text + ")");
+                if (text == null || text.length() == 0)
+                    return;
 
                 // displaying system alert dialog on the screen instead of
                 // using another activity to display the message.  This
@@ -1070,7 +1083,21 @@ public class PhoneUtils {
                         public void onClick(DialogInterface dialog, int whichButton) {
                             switch (whichButton) {
                                 case DialogInterface.BUTTON_POSITIVE:
-                                    phone.sendUssdResponse(inputText.getText().toString());
+                                    // As per spec 24.080, valid length of ussd string
+                                    // is 1 - 160. If length is out of the range then
+                                    // display toast message & Cancel MMI operation.
+                                    if (inputText.length() < MIN_USSD_LEN
+                                            || inputText.length() > MAX_USSD_LEN) {
+                                        Toast.makeText(app,
+                                                app.getResources().getString(R.string.enter_input,
+                                                MIN_USSD_LEN, MAX_USSD_LEN),
+                                                Toast.LENGTH_LONG).show();
+                                        if (mmiCode.isCancelable()) {
+                                            mmiCode.cancel();
+                                        }
+                                    } else {
+                                        phone.sendUssdResponse(inputText.getText().toString());
+                                    }
                                     break;
                                 case DialogInterface.BUTTON_NEGATIVE:
                                     if (mmiCode.isCancelable()) {
@@ -1147,18 +1174,6 @@ public class PhoneUtils {
                 canceled = true;
             }
         }
-
-        //clear timeout message and pre-set MMI command
-        if (mNwService != null) {
-            try {
-                mNwService.clearMmiString();
-            } catch (RemoteException e) {
-                mNwService = null;
-            }
-        }
-        if (mMmiTimeoutCbMsg != null) {
-            mMmiTimeoutCbMsg = null;
-        }
         return canceled;
     }
 
@@ -1170,6 +1185,54 @@ public class PhoneUtils {
         VoiceMailNumberMissingException(String msg) {
             super(msg);
         }
+    }
+
+    /**
+     * Given an Intent (which is presumably the ACTION_CALL intent that
+     * initiated this outgoing call), figure out the actual phone number we
+     * should dial.
+     *
+     * Note that the returned "number" may actually be a SIP address,
+     * if the specified intent contains a sip: URI.
+     *
+     * This method is basically a wrapper around PhoneUtils.getNumberFromIntent(),
+     * except it's also aware of the EXTRA_ACTUAL_NUMBER_TO_DIAL extra.
+     * (That extra, if present, tells us the exact string to pass down to the
+     * telephony layer.  It's guaranteed to be safe to dial: it's either a PSTN
+     * phone number with separators and keypad letters stripped out, or a raw
+     * unencoded SIP address.)
+     *
+     * @return the phone number corresponding to the specified Intent, or null
+     *   if the Intent has no action or if the intent's data is malformed or
+     *   missing.
+     *
+     * @throws VoiceMailNumberMissingException if the intent
+     *   contains a "voicemail" URI, but there's no voicemail
+     *   number configured on the device.
+     */
+    public static String getInitialNumber(Intent intent)
+            throws PhoneUtils.VoiceMailNumberMissingException {
+        if (DBG) log("getInitialNumber(): " + intent);
+
+        String action = intent.getAction();
+        if (TextUtils.isEmpty(action)) {
+            return null;
+        }
+
+        // If the EXTRA_ACTUAL_NUMBER_TO_DIAL extra is present, get the phone
+        // number from there.  (That extra takes precedence over the actual data
+        // included in the intent.)
+        if (intent.hasExtra(OutgoingCallBroadcaster.EXTRA_ACTUAL_NUMBER_TO_DIAL)) {
+            String actualNumberToDial =
+                    intent.getStringExtra(OutgoingCallBroadcaster.EXTRA_ACTUAL_NUMBER_TO_DIAL);
+            if (DBG) {
+                log("==> got EXTRA_ACTUAL_NUMBER_TO_DIAL; returning '"
+                        + toLogSafePhoneNumber(actualNumberToDial) + "'");
+            }
+            return actualNumberToDial;
+        }
+
+        return getNumberFromIntent(PhoneGlobals.getInstance(), intent);
     }
 
     /**
@@ -1195,14 +1258,14 @@ public class PhoneUtils {
      * @return the phone number (or SIP address) that would be called by the intent,
      *         or <code>null</code> if the number cannot be found.
      */
-    static String getNumberFromIntent(Context context, Intent intent)
+    private static String getNumberFromIntent(Context context, Intent intent)
             throws VoiceMailNumberMissingException {
         Uri uri = intent.getData();
         String scheme = uri.getScheme();
 
         // The sip: scheme is simple: just treat the rest of the URI as a
         // SIP address.
-        if (scheme.equals("sip")) {
+        if (Constants.SCHEME_SIP.equals(scheme)) {
             return uri.getSchemeSpecificPart();
         }
 
@@ -1213,7 +1276,7 @@ public class PhoneUtils {
 
         // Check for a voicemail-dialing request.  If the voicemail number is
         // empty, throw a VoiceMailNumberMissingException.
-        if (scheme.equals("voicemail") &&
+        if (Constants.SCHEME_VOICEMAIL.equals(scheme) &&
                 (number == null || TextUtils.isEmpty(number)))
             throw new VoiceMailNumberMissingException();
 
@@ -1262,7 +1325,7 @@ public class PhoneUtils {
                     // querying a new CallerInfo using the connection's phone number.
                     String number = c.getAddress();
 
-                    if (DBG) log("getCallerInfo: number = " + number);
+                    if (DBG) log("getCallerInfo: number = " + toLogSafePhoneNumber(number));
 
                     if (!TextUtils.isEmpty(number)) {
                         info = CallerInfo.getCallerInfo(context, number);
@@ -1294,13 +1357,12 @@ public class PhoneUtils {
      */
     static CallerInfoToken startGetCallerInfo(Context context, Call call,
             CallerInfoAsyncQuery.OnQueryCompleteListener listener, Object cookie) {
-        PhoneApp app = PhoneApp.getInstance();
         Connection conn = null;
         int phoneType = call.getPhone().getPhoneType();
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
+        if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
             conn = call.getLatestConnection();
-        } else if ((phoneType == Phone.PHONE_TYPE_GSM)
-                || (phoneType == Phone.PHONE_TYPE_SIP)) {
+        } else if ((phoneType == PhoneConstants.PHONE_TYPE_GSM)
+                || (phoneType == PhoneConstants.PHONE_TYPE_SIP)) {
             conn = call.getEarliestConnection();
         } else {
             throw new IllegalStateException("Unexpected phone type: " + phoneType);
@@ -1324,10 +1386,16 @@ public class PhoneUtils {
             return cit;
         }
 
-        // There are now 3 states for the userdata.
-        //   1. Uri - query has not been executed yet
-        //   2. CallerInfoToken - query is executing, but has not completed.
-        //   3. CallerInfo - query has executed.
+        Object userDataObject = c.getUserData();
+
+        // There are now 3 states for the Connection's userData object:
+        //
+        //   (1) Uri - query has not been executed yet
+        //
+        //   (2) CallerInfoToken - query is executing, but has not completed.
+        //
+        //   (3) CallerInfo - query has executed.
+        //
         // In each case we have slightly different behaviour:
         //   1. If the query has not been executed yet (Uri or null), we start
         //      query execution asynchronously, and note it by attaching a
@@ -1353,8 +1421,10 @@ public class PhoneUtils {
         //      outcome.  From now on, we will append an empty CallerInfo
         //      object, to mirror previous behaviour, and to avoid Null Pointer
         //      Exceptions.
-        Object userDataObject = c.getUserData();
+
         if (userDataObject instanceof Uri) {
+            // State (1): query has not been executed yet
+
             //create a dummy callerinfo, populate with what we know from URI.
             cit = new CallerInfoToken();
             cit.currentInfo = new CallerInfo();
@@ -1373,17 +1443,17 @@ public class PhoneUtils {
             String number = c.getAddress();
 
             if (DBG) {
-                log("###### PhoneUtils.startGetCallerInfo: new query for phone number #####");
-                log("- number (address): " + number);
+                log("PhoneUtils.startGetCallerInfo: new query for phone number...");
+                log("- number (address): " + toLogSafePhoneNumber(number));
                 log("- c: " + c);
                 log("- phone: " + c.getCall().getPhone());
                 int phoneType = c.getCall().getPhone().getPhoneType();
                 log("- phoneType: " + phoneType);
                 switch (phoneType) {
-                    case Phone.PHONE_TYPE_NONE: log("  ==> PHONE_TYPE_NONE"); break;
-                    case Phone.PHONE_TYPE_GSM: log("  ==> PHONE_TYPE_GSM"); break;
-                    case Phone.PHONE_TYPE_CDMA: log("  ==> PHONE_TYPE_CDMA"); break;
-                    case Phone.PHONE_TYPE_SIP: log("  ==> PHONE_TYPE_SIP"); break;
+                    case PhoneConstants.PHONE_TYPE_NONE: log("  ==> PHONE_TYPE_NONE"); break;
+                    case PhoneConstants.PHONE_TYPE_GSM: log("  ==> PHONE_TYPE_GSM"); break;
+                    case PhoneConstants.PHONE_TYPE_CDMA: log("  ==> PHONE_TYPE_CDMA"); break;
+                    case PhoneConstants.PHONE_TYPE_SIP: log("  ==> PHONE_TYPE_SIP"); break;
                     default: log("  ==> Unknown phone type"); break;
                 }
             }
@@ -1399,7 +1469,7 @@ public class PhoneUtils {
             cit.currentInfo.numberPresentation = c.getNumberPresentation();
             cit.currentInfo.namePresentation = c.getCnapNamePresentation();
 
-            if (DBG) {
+            if (VDBG) {
                 log("startGetCallerInfo: number = " + number);
                 log("startGetCallerInfo: CNAP Info from FW(1): name="
                     + cit.currentInfo.cnapName
@@ -1417,7 +1487,7 @@ public class PhoneUtils {
                 // For scenarios where we may receive a valid number from the network but a
                 // restricted/unavailable presentation, we do not want to perform a contact query
                 // (see note on isFinal above). So we set isFinal to true here as well.
-                if (cit.currentInfo.numberPresentation != Connection.PRESENTATION_ALLOWED) {
+                if (cit.currentInfo.numberPresentation != PhoneConstants.PRESENTATION_ALLOWED) {
                     cit.isFinal = true;
                 } else {
                     if (DBG) log("==> Actually starting CallerInfoAsyncQuery.startQuery()...");
@@ -1438,10 +1508,14 @@ public class PhoneUtils {
 
             c.setUserData(cit);
 
-            if (DBG) log("startGetCallerInfo: query based on number: " + number);
+            if (DBG) {
+                log("startGetCallerInfo: query based on number: " + toLogSafePhoneNumber(number));
+            }
 
         } else if (userDataObject instanceof CallerInfoToken) {
-            // query is running, just tack on this listener to the queue.
+            // State (2): query is executing, but has not completed.
+
+            // just tack on this listener to the queue.
             cit = (CallerInfoToken) userDataObject;
 
             // handling case where number is null (caller id hidden) as well.
@@ -1453,7 +1527,10 @@ public class PhoneUtils {
             } else {
                 // handling case where number/name gets updated later on by the network
                 String updatedNumber = c.getAddress();
-                if (DBG) log("startGetCallerInfo: updatedNumber initially = " + updatedNumber);
+                if (DBG) {
+                    log("startGetCallerInfo: updatedNumber initially = "
+                            + toLogSafePhoneNumber(updatedNumber));
+                }
                 if (!TextUtils.isEmpty(updatedNumber)) {
                     // Store CNAP information retrieved from the Connection
                     cit.currentInfo.cnapName =  c.getCnapName();
@@ -1466,14 +1543,21 @@ public class PhoneUtils {
                             updatedNumber, cit.currentInfo.numberPresentation);
 
                     cit.currentInfo.phoneNumber = updatedNumber;
-                    if (DBG) log("startGetCallerInfo: updatedNumber=" + updatedNumber);
-                    if (DBG) log("startGetCallerInfo: CNAP Info from FW(2): name="
-                            + cit.currentInfo.cnapName
-                            + ", Name/Number Pres=" + cit.currentInfo.numberPresentation);
+                    if (DBG) {
+                        log("startGetCallerInfo: updatedNumber="
+                                + toLogSafePhoneNumber(updatedNumber));
+                    }
+                    if (VDBG) {
+                        log("startGetCallerInfo: CNAP Info from FW(2): name="
+                                + cit.currentInfo.cnapName
+                                + ", Name/Number Pres=" + cit.currentInfo.numberPresentation);
+                    } else if (DBG) {
+                        log("startGetCallerInfo: CNAP Info from FW(2)");
+                    }
                     // For scenarios where we may receive a valid number from the network but a
                     // restricted/unavailable presentation, we do not want to perform a contact query
                     // (see note on isFinal above). So we set isFinal to true here as well.
-                    if (cit.currentInfo.numberPresentation != Connection.PRESENTATION_ALLOWED) {
+                    if (cit.currentInfo.numberPresentation != PhoneConstants.PRESENTATION_ALLOWED) {
                         cit.isFinal = true;
                     } else {
                         cit.asyncQuery = CallerInfoAsyncQuery.startQuery(QUERY_TOKEN, context,
@@ -1493,30 +1577,46 @@ public class PhoneUtils {
                     cit.currentInfo.numberPresentation = c.getNumberPresentation();
                     cit.currentInfo.namePresentation = c.getCnapNamePresentation();
 
-                    if (DBG) log("startGetCallerInfo: CNAP Info from FW(3): name="
-                            + cit.currentInfo.cnapName
-                            + ", Name/Number Pres=" + cit.currentInfo.numberPresentation);
+                    if (VDBG) {
+                        log("startGetCallerInfo: CNAP Info from FW(3): name="
+                                + cit.currentInfo.cnapName
+                                + ", Name/Number Pres=" + cit.currentInfo.numberPresentation);
+                    } else if (DBG) {
+                        log("startGetCallerInfo: CNAP Info from FW(3)");
+                    }
                     cit.isFinal = true; // please see note on isFinal, above.
                 }
             }
         } else {
+            // State (3): query is complete.
+
+            // The connection's userDataObject is a full-fledged
+            // CallerInfo instance.  Wrap it in a CallerInfoToken and
+            // return it to the user.
+
             cit = new CallerInfoToken();
             cit.currentInfo = (CallerInfo) userDataObject;
             cit.asyncQuery = null;
             cit.isFinal = true;
             // since the query is already done, call the listener.
             if (DBG) log("startGetCallerInfo: query already done, returning CallerInfo");
+            if (DBG) log("==> cit.currentInfo = " + cit.currentInfo);
         }
         return cit;
     }
 
     /**
-     * Implemented for CallerInfo.OnCallerInfoQueryCompleteListener interface.
-     * Updates the connection's userData when called.
+     * Static CallerInfoAsyncQuery.OnQueryCompleteListener instance that
+     * we use with all our CallerInfoAsyncQuery.startQuery() requests.
      */
     private static final int QUERY_TOKEN = -1;
     static CallerInfoAsyncQuery.OnQueryCompleteListener sCallerInfoQueryListener =
         new CallerInfoAsyncQuery.OnQueryCompleteListener () {
+            /**
+             * When the query completes, we stash the resulting CallerInfo
+             * object away in the Connection's "userData" (where it will
+             * later be retrieved by the in-call UI.)
+             */
             public void onQueryComplete(int token, Object cookie, CallerInfo ci) {
                 if (DBG) log("query complete, updating connection.userdata");
                 Connection conn = (Connection) cookie;
@@ -1545,12 +1645,22 @@ public class PhoneUtils {
                         ci.numberPresentation = conn.getNumberPresentation();
                     }
                 } else {
+                    // No matching contact was found for this number.
+                    // Return a new CallerInfo based solely on the CNAP
+                    // information from the network.
+
                     CallerInfo newCi = getCallerInfo(null, conn);
+
+                    // ...but copy over the (few) things we care about
+                    // from the original CallerInfo object:
                     if (newCi != null) {
                         newCi.phoneNumber = ci.phoneNumber; // To get formatted phone number
+                        newCi.geoDescription = ci.geoDescription; // To get geo description string
                         ci = newCi;
                     }
                 }
+
+                if (DBG) log("==> Stashing CallerInfo " + ci + " into the connection...");
                 conn.setUserData(ci);
             }
         };
@@ -1581,15 +1691,15 @@ public class PhoneUtils {
             // If we're still null/empty here, then check if we have a presentation
             // string that takes precedence that we could return, otherwise display
             // "unknown" string.
-            if (ci != null && ci.numberPresentation == Connection.PRESENTATION_RESTRICTED) {
+            if (ci != null && ci.numberPresentation == PhoneConstants.PRESENTATION_RESTRICTED) {
                 compactName = context.getString(R.string.private_num);
-            } else if (ci != null && ci.numberPresentation == Connection.PRESENTATION_PAYPHONE) {
+            } else if (ci != null && ci.numberPresentation == PhoneConstants.PRESENTATION_PAYPHONE) {
                 compactName = context.getString(R.string.payphone);
             } else {
                 compactName = context.getString(R.string.unknown);
             }
         }
-        if (DBG) log("getCompactNameFromCallerInfo: compactName=" + compactName);
+        if (VDBG) log("getCompactNameFromCallerInfo: compactName=" + compactName);
         return compactName;
     }
 
@@ -1615,9 +1725,9 @@ public class PhoneUtils {
         // you're in a 3-way call, all we can do is display the "generic"
         // state of the UI.)  So as far as the in-call UI is concerned,
         // Conference corresponds to generic display.
-        PhoneApp app = PhoneApp.getInstance();
+        final PhoneGlobals app = PhoneGlobals.getInstance();
         int phoneType = call.getPhone().getPhoneType();
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
+        if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
             CdmaPhoneCallState.PhoneCallState state = app.cdmaPhoneCallState.getCurrentCallState();
             if ((state == CdmaPhoneCallState.PhoneCallState.CONF_CALL)
                     || ((state == CdmaPhoneCallState.PhoneCallState.THRWAY_ACTIVE)
@@ -1656,12 +1766,14 @@ public class PhoneUtils {
      * Launch the Dialer to start a new call.
      * This is just a wrapper around the ACTION_DIAL intent.
      */
-    static void startNewCall(final CallManager cm) {
+    /* package */ static boolean startNewCall(final CallManager cm) {
+        final PhoneGlobals app = PhoneGlobals.getInstance();
+
         // Sanity-check that this is OK given the current state of the phone.
         if (!okToAddCall(cm)) {
             Log.w(LOG_TAG, "startNewCall: can't add a new call in the current state");
             dumpCallManager();
-            return;
+            return false;
         }
 
         // if applicable, mute the call while we're showing the add call UI.
@@ -1669,7 +1781,7 @@ public class PhoneUtils {
             setMuteInternal(cm.getActiveFgCall().getPhone(), true);
             // Inform the phone app that this mute state was NOT done
             // voluntarily by the User.
-            PhoneApp.getInstance().setRestoreMuteOnInCallResume(true);
+            app.setRestoreMuteOnInCallResume(true);
         }
 
         Intent intent = new Intent(Intent.ACTION_DIAL);
@@ -1679,30 +1791,45 @@ public class PhoneUtils {
         // it that we're going through the "add call" option from the
         // InCallScreen / PhoneUtils.
         intent.putExtra(ADD_CALL_MODE_KEY, true);
+        try {
+            app.startActivity(intent);
+        } catch (ActivityNotFoundException e) {
+            // This is rather rare but possible.
+            // Note: this method is used even when the phone is encrypted. At that moment
+            // the system may not find any Activity which can accept this Intent.
+            Log.e(LOG_TAG, "Activity for adding calls isn't found.");
+            return false;
+        }
 
-        PhoneApp.getInstance().startActivity(intent);
+        return true;
     }
 
-    static void turnOnSpeaker(Context context, boolean flag, boolean store) {
+    /**
+     * Turns on/off speaker.
+     *
+     * @param context Context
+     * @param flag True when speaker should be on. False otherwise.
+     * @param store True when the settings should be stored in the device.
+     */
+    /* package */ static void turnOnSpeaker(Context context, boolean flag, boolean store) {
         if (DBG) log("turnOnSpeaker(flag=" + flag + ", store=" + store + ")...");
-        AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        final PhoneGlobals app = PhoneGlobals.getInstance();
 
+        AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         audioManager.setSpeakerphoneOn(flag);
+
         // record the speaker-enable value
         if (store) {
             sIsSpeakerEnabled = flag;
         }
-        if (flag) {
-            NotificationMgr.getDefault().notifySpeakerphone();
-        } else {
-            NotificationMgr.getDefault().cancelSpeakerphone();
-        }
+
+        // Update the status bar icon
+        app.notificationMgr.updateSpeakerNotification(flag);
 
         // We also need to make a fresh call to PhoneApp.updateWakeState()
         // any time the speaker state changes, since the screen timeout is
         // sometimes different depending on whether or not the speaker is
         // in use.
-        PhoneApp app = PhoneApp.getInstance();
         app.updateWakeState();
 
         // Update the Proximity sensor based on speaker state
@@ -1794,11 +1921,10 @@ public class PhoneUtils {
      *
      */
     static void setMute(boolean muted) {
-        CallManager cm = PhoneApp.getInstance().mCM;
+        CallManager cm = PhoneGlobals.getInstance().mCM;
 
         // make the call to mute the audio
         setMuteInternal(cm.getFgPhone(), muted);
-
 
         // update the foreground connections to match.  This includes
         // all the connections on conference calls.
@@ -1814,19 +1940,20 @@ public class PhoneUtils {
      * Internally used muting function.
      */
     private static void setMuteInternal(Phone phone, boolean muted) {
-        if (DBG) log("setMuteInternal: " + muted);
+        final PhoneGlobals app = PhoneGlobals.getInstance();
         Context context = phone.getContext();
         boolean routeToAudioManager =
             context.getResources().getBoolean(R.bool.send_mic_mute_to_AudioManager);
         if (routeToAudioManager) {
             AudioManager audioManager =
                 (AudioManager) phone.getContext().getSystemService(Context.AUDIO_SERVICE);
-            if (DBG) log("setMicrophoneMute: " + muted);
+            if (DBG) log("setMuteInternal: using setMicrophoneMute(" + muted + ")...");
             audioManager.setMicrophoneMute(muted);
         } else {
+            if (DBG) log("setMuteInternal: using phone.setMute(" + muted + ")...");
             phone.setMute(muted);
         }
-        NotificationMgr.getDefault().updateMuteNotification();
+        app.notificationMgr.updateMuteNotification();
     }
 
     /**
@@ -1834,7 +1961,7 @@ public class PhoneUtils {
      * foreground call
      */
     static boolean getMute() {
-        PhoneApp app = PhoneApp.getInstance();
+        final PhoneGlobals app = PhoneGlobals.getInstance();
 
         boolean routeToAudioManager =
             app.getResources().getBoolean(R.bool.send_mic_mute_to_AudioManager);
@@ -1848,7 +1975,7 @@ public class PhoneUtils {
     }
 
     /* package */ static void setAudioMode() {
-        setAudioMode(PhoneApp.getInstance().mCM);
+        setAudioMode(PhoneGlobals.getInstance().mCM);
     }
 
     /**
@@ -1857,7 +1984,7 @@ public class PhoneUtils {
     /* package */ static void setAudioMode(CallManager cm) {
         if (DBG) Log.d(LOG_TAG, "setAudioMode()..." + cm.getState());
 
-        Context context = PhoneApp.getInstance();
+        Context context = PhoneGlobals.getInstance();
         AudioManager audioManager = (AudioManager)
                 context.getSystemService(Context.AUDIO_SERVICE);
         int modeBefore = audioManager.getMode();
@@ -1895,10 +2022,11 @@ public class PhoneUtils {
      */
     /* package */ static boolean handleHeadsetHook(Phone phone, KeyEvent event) {
         if (DBG) log("handleHeadsetHook()..." + event.getAction() + " " + event.getRepeatCount());
+        final PhoneGlobals app = PhoneGlobals.getInstance();
 
         // If the phone is totally idle, we ignore HEADSETHOOK events
         // (and instead let them fall through to the media player.)
-        if (phone.getState() == Phone.State.IDLE) {
+        if (phone.getState() == PhoneConstants.State.IDLE) {
             return false;
         }
 
@@ -1920,17 +2048,18 @@ public class PhoneUtils {
             // If an incoming call is ringing, answer it (just like with the
             // CALL button):
             int phoneType = phone.getPhoneType();
-            if (phoneType == Phone.PHONE_TYPE_CDMA) {
+            if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
                 answerCall(phone.getRingingCall());
-            } else if ((phoneType == Phone.PHONE_TYPE_GSM)
-                    || (phoneType == Phone.PHONE_TYPE_SIP)) {
+            } else if ((phoneType == PhoneConstants.PHONE_TYPE_GSM)
+                    || (phoneType == PhoneConstants.PHONE_TYPE_SIP)) {
                 if (hasActiveCall && hasHoldingCall) {
                     if (DBG) log("handleHeadsetHook: ringing (both lines in use) ==> answer!");
-                    answerAndEndActive(PhoneApp.getInstance().mCM, phone.getRingingCall());
+                    answerAndEndActive(app.mCM, phone.getRingingCall());
                 } else {
                     if (DBG) log("handleHeadsetHook: ringing ==> answer!");
-                    answerCall(phone.getRingingCall());  // Automatically holds the current active call,
-                                        // if there is one
+                    // answerCall() will automatically hold the current
+                    // active call, if there is one.
+                    answerCall(phone.getRingingCall());
                 }
             } else {
                 throw new IllegalStateException("Unexpected phone type: " + phoneType);
@@ -1939,13 +2068,14 @@ public class PhoneUtils {
             // No incoming ringing call.
             if (event.isLongPress()) {
                 if (DBG) log("handleHeadsetHook: longpress -> hangup");
-                hangup(PhoneApp.getInstance().mCM);
+                hangup(app.mCM);
             }
             else if (event.getAction() == KeyEvent.ACTION_UP &&
                      event.getRepeatCount() == 0) {
                 Connection c = phone.getForegroundCall().getLatestConnection();
                 // If it is NOT an emg #, toggle the mute state. Otherwise, ignore the hook.
-                if (c != null && !PhoneNumberUtils.isEmergencyNumber(c.getAddress())) {
+                if (c != null && !PhoneNumberUtils.isLocalEmergencyNumber(c.getAddress(),
+                                                                          PhoneGlobals.getInstance())) {
                     if (getMute()) {
                         if (DBG) log("handleHeadsetHook: UNmuting...");
                         setMute(false);
@@ -2014,14 +2144,14 @@ public class PhoneUtils {
      */
     /* package */ static boolean okToSwapCalls(CallManager cm) {
         int phoneType = cm.getDefaultPhone().getPhoneType();
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
+        if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
             // CDMA: "Swap" is enabled only when the phone reaches a *generic*.
             // state by either accepting a Call Waiting or by merging two calls
-            PhoneApp app = PhoneApp.getInstance();
+            PhoneGlobals app = PhoneGlobals.getInstance();
             return (app.cdmaPhoneCallState.getCurrentCallState()
                     == CdmaPhoneCallState.PhoneCallState.CONF_CALL);
-        } else if ((phoneType == Phone.PHONE_TYPE_GSM)
-                || (phoneType == Phone.PHONE_TYPE_SIP)) {
+        } else if ((phoneType == PhoneConstants.PHONE_TYPE_GSM)
+                || (phoneType == PhoneConstants.PHONE_TYPE_SIP)) {
             // GSM: "Swap" is available if both lines are in use and there's no
             // incoming call.  (Actually we need to verify that the active
             // call really is in the ACTIVE state and the holding call really
@@ -2041,9 +2171,9 @@ public class PhoneUtils {
      */
     /* package */ static boolean okToMergeCalls(CallManager cm) {
         int phoneType = cm.getFgPhone().getPhoneType();
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
+        if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
             // CDMA: "Merge" is enabled only when the user is in a 3Way call.
-            PhoneApp app = PhoneApp.getInstance();
+            PhoneGlobals app = PhoneGlobals.getInstance();
             return ((app.cdmaPhoneCallState.getCurrentCallState()
                     == CdmaPhoneCallState.PhoneCallState.THRWAY_ACTIVE)
                     && !app.cdmaPhoneCallState.IsThreeWayCallOrigStateDialing());
@@ -2072,15 +2202,15 @@ public class PhoneUtils {
 
         int phoneType = phone.getPhoneType();
         final Call.State fgCallState = cm.getActiveFgCall().getState();
-        if (phoneType == Phone.PHONE_TYPE_CDMA) {
-           // CDMA: "Add call" menu item is only enabled when the call is in
+        if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+           // CDMA: "Add call" button is only enabled when:
            // - ForegroundCall is in ACTIVE state
            // - After 30 seconds of user Ignoring/Missing a Call Waiting call.
-            PhoneApp app = PhoneApp.getInstance();
+            PhoneGlobals app = PhoneGlobals.getInstance();
             return ((fgCallState == Call.State.ACTIVE)
                     && (app.cdmaPhoneCallState.getAddCallMenuStateAfterCallWaiting()));
-        } else if ((phoneType == Phone.PHONE_TYPE_GSM)
-                || (phoneType == Phone.PHONE_TYPE_SIP)) {
+        } else if ((phoneType == PhoneConstants.PHONE_TYPE_GSM)
+                || (phoneType == PhoneConstants.PHONE_TYPE_SIP)) {
             // GSM: "Add call" is available only if ALL of the following are true:
             // - There's no incoming ringing call
             // - There's < 2 lines in use
@@ -2111,13 +2241,13 @@ public class PhoneUtils {
                 n.equals("P") ||
                 n.equals("RES")) {
             if (DBG) log("checkCnapSpecialCases, PRIVATE string: " + n);
-            return Connection.PRESENTATION_RESTRICTED;
+            return PhoneConstants.PRESENTATION_RESTRICTED;
         } else if (n.equals("UNAVAILABLE") ||
                 n.equals("UNKNOWN") ||
                 n.equals("UNA") ||
                 n.equals("U")) {
             if (DBG) log("checkCnapSpecialCases, UNKNOWN string: " + n);
-            return Connection.PRESENTATION_UNKNOWN;
+            return PhoneConstants.PRESENTATION_UNKNOWN;
         } else {
             if (DBG) log("checkCnapSpecialCases, normal str. number: " + n);
             return CNAP_SPECIAL_CASE_NO;
@@ -2139,16 +2269,21 @@ public class PhoneUtils {
         // displayed/logged after this function returns based on the presentation value.
         if (ci == null || number == null) return number;
 
-        if (DBG) log("modifyForSpecialCnapCases: initially, number=" + number
-                + ", presentation=" + presentation + " ci " + ci);
+        if (DBG) {
+            log("modifyForSpecialCnapCases: initially, number="
+                    + toLogSafePhoneNumber(number)
+                    + ", presentation=" + presentation + " ci " + ci);
+        }
 
         // "ABSENT NUMBER" is a possible value we could get from the network as the
         // phone number, so if this happens, change it to "Unknown" in the CallerInfo
         // and fix the presentation to be the same.
-        if (number.equals(context.getString(R.string.absent_num))
-                && presentation == Connection.PRESENTATION_ALLOWED) {
+        final String[] absentNumberValues =
+                context.getResources().getStringArray(R.array.absent_num);
+        if (Arrays.asList(absentNumberValues).contains(number)
+                && presentation == PhoneConstants.PRESENTATION_ALLOWED) {
             number = context.getString(R.string.unknown);
-            ci.numberPresentation = Connection.PRESENTATION_UNKNOWN;
+            ci.numberPresentation = PhoneConstants.PRESENTATION_UNKNOWN;
         }
 
         // Check for other special "corner cases" for CNAP and fix them similarly. Corner
@@ -2156,23 +2291,28 @@ public class PhoneUtils {
         // if we think we have an allowed presentation, or if the CallerInfo presentation doesn't
         // match the presentation passed in for verification (meaning we changed it previously
         // because it's a corner case and we're being called from a different entry point).
-        if (ci.numberPresentation == Connection.PRESENTATION_ALLOWED
+        if (ci.numberPresentation == PhoneConstants.PRESENTATION_ALLOWED
                 || (ci.numberPresentation != presentation
-                        && presentation == Connection.PRESENTATION_ALLOWED)) {
+                        && presentation == PhoneConstants.PRESENTATION_ALLOWED)) {
             int cnapSpecialCase = checkCnapSpecialCases(number);
             if (cnapSpecialCase != CNAP_SPECIAL_CASE_NO) {
                 // For all special strings, change number & numberPresentation.
-                if (cnapSpecialCase == Connection.PRESENTATION_RESTRICTED) {
+                if (cnapSpecialCase == PhoneConstants.PRESENTATION_RESTRICTED) {
                     number = context.getString(R.string.private_num);
-                } else if (cnapSpecialCase == Connection.PRESENTATION_UNKNOWN) {
+                } else if (cnapSpecialCase == PhoneConstants.PRESENTATION_UNKNOWN) {
                     number = context.getString(R.string.unknown);
                 }
-                if (DBG) log("SpecialCnap: number=" + number
-                        + "; presentation now=" + cnapSpecialCase);
+                if (DBG) {
+                    log("SpecialCnap: number=" + toLogSafePhoneNumber(number)
+                            + "; presentation now=" + cnapSpecialCase);
+                }
                 ci.numberPresentation = cnapSpecialCase;
             }
         }
-        if (DBG) log("modifyForSpecialCnapCases: returning number string=" + number);
+        if (DBG) {
+            log("modifyForSpecialCnapCases: returning number string="
+                    + toLogSafePhoneNumber(number));
+        }
         return number;
     }
 
@@ -2272,7 +2412,7 @@ public class PhoneUtils {
      */
     /* package */ static String formatProviderUri(Uri uri) {
         if (null != uri) {
-            if ("tel".equals(uri.getScheme())) {
+            if (Constants.SCHEME_TEL.equals(uri.getScheme())) {
                 return PhoneNumberUtils.formatNumber(uri.getSchemeSpecificPart());
             } else {
                 return uri.toString();
@@ -2309,20 +2449,22 @@ public class PhoneUtils {
     * Check if the phone is in a car dock or desk dock.
     * If yes, turn on the speaker, when no wired or BT headsets are connected.
     * Otherwise do nothing.
+    * @return true if activated
     */
-    private static void activateSpeakerIfDocked(Phone phone) {
+    private static boolean activateSpeakerIfDocked(Phone phone) {
         if (DBG) log("activateSpeakerIfDocked()...");
 
-        if (PhoneApp.mDockState == Intent.EXTRA_DOCK_STATE_DESK ||
-                PhoneApp.mDockState == Intent.EXTRA_DOCK_STATE_CAR) {
+        boolean activated = false;
+        if (PhoneGlobals.mDockState != Intent.EXTRA_DOCK_STATE_UNDOCKED) {
             if (DBG) log("activateSpeakerIfDocked(): In a dock -> may need to turn on speaker.");
-            PhoneApp app = PhoneApp.getInstance();
-            BluetoothHandsfree bthf = app.getBluetoothHandsfree();
+            PhoneGlobals app = PhoneGlobals.getInstance();
 
-            if (!app.isHeadsetPlugged() && !(bthf != null && bthf.isAudioOn())) {
+            if (!app.isHeadsetPlugged() && !app.isBluetoothHeadsetAudioOn()) {
                 turnOnSpeaker(phone.getContext(), true, true);
+                activated = true;
             }
         }
+        return activated;
     }
 
 
@@ -2355,8 +2497,12 @@ public class PhoneUtils {
      */
     public static Phone pickPhoneBasedOnNumber(CallManager cm,
             String scheme, String number, String primarySipUri) {
-        if (DBG) log("pickPhoneBasedOnNumber: scheme " + scheme
-                + ", number " + number + ", sipUri " + primarySipUri);
+        if (DBG) {
+            log("pickPhoneBasedOnNumber: scheme " + scheme
+                    + ", number " + toLogSafePhoneNumber(number)
+                    + ", sipUri "
+                    + (primarySipUri != null ? Uri.parse(primarySipUri).toSafeString() : "null"));
+        }
 
         if (primarySipUri != null) {
             Phone phone = getSipPhoneFromUri(cm, primarySipUri);
@@ -2367,7 +2513,7 @@ public class PhoneUtils {
 
     public static Phone getSipPhoneFromUri(CallManager cm, String target) {
         for (Phone phone : cm.getAllPhones()) {
-            if (phone.getPhoneType() == Phone.PHONE_TYPE_SIP) {
+            if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_SIP) {
                 String sipUri = ((SipPhone) phone).getSipUri();
                 if (target.equals(sipUri)) {
                     if (DBG) log("- pickPhoneBasedOnNumber:" +
@@ -2380,68 +2526,78 @@ public class PhoneUtils {
         return null;
     }
 
+    /**
+     * Returns true when the given call is in INCOMING state and there's no foreground phone call,
+     * meaning the call is the first real incoming call the phone is having.
+     */
     public static boolean isRealIncomingCall(Call.State state) {
-        return (state == Call.State.INCOMING && !PhoneApp.getInstance().mCM.hasActiveFgCall());
+        return (state == Call.State.INCOMING && !PhoneGlobals.getInstance().mCM.hasActiveFgCall());
+    }
 
+    private static boolean sVoipSupported = false;
+    static {
+        PhoneGlobals app = PhoneGlobals.getInstance();
+        sVoipSupported = SipManager.isVoipSupported(app)
+                && app.getResources().getBoolean(com.android.internal.R.bool.config_built_in_sip_phone)
+                && app.getResources().getBoolean(com.android.internal.R.bool.config_voice_capable);
+    }
+
+    /**
+     * @return true if this device supports voice calls using the built-in SIP stack.
+     */
+    static boolean isVoipSupported() {
+        return sVoipSupported;
+    }
+
+    /**
+     * On GSM devices, we never use short tones.
+     * On CDMA devices, it depends upon the settings.
+     */
+    public static boolean useShortDtmfTones(Phone phone, Context context) {
+        int phoneType = phone.getPhoneType();
+        if (phoneType == PhoneConstants.PHONE_TYPE_GSM) {
+            return false;
+        } else if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+            int toneType = android.provider.Settings.System.getInt(
+                    context.getContentResolver(),
+                    Settings.System.DTMF_TONE_TYPE_WHEN_DIALING,
+                    CallFeaturesSetting.DTMF_TONE_TYPE_NORMAL);
+            if (toneType == CallFeaturesSetting.DTMF_TONE_TYPE_NORMAL) {
+                return true;
+            } else {
+                return false;
+            }
+        } else if (phoneType == PhoneConstants.PHONE_TYPE_SIP) {
+            return false;
+        } else {
+            throw new IllegalStateException("Unexpected phone type: " + phoneType);
+        }
+    }
+
+    public static String getPresentationString(Context context, int presentation) {
+        String name = context.getString(R.string.unknown);
+        if (presentation == PhoneConstants.PRESENTATION_RESTRICTED) {
+            name = context.getString(R.string.private_num);
+        } else if (presentation == PhoneConstants.PRESENTATION_PAYPHONE) {
+            name = context.getString(R.string.payphone);
+        }
+        return name;
+    }
+
+    public static void sendViewNotificationAsync(Context context, Uri contactUri) {
+        if (DBG) Log.d(LOG_TAG, "Send view notification to Contacts (uri: " + contactUri + ")");
+        Intent intent = new Intent("com.android.contacts.VIEW_NOTIFICATION", contactUri);
+        intent.setClassName("com.android.contacts",
+                "com.android.contacts.ViewNotificationService");
+        context.startService(intent);
     }
 
     //
     // General phone and call state debugging/testing code
     //
 
-    private static void dumpStateForCall(Call call, String prefix) {
-        StringBuilder b = new StringBuilder(128);
-        b.append(prefix).append(call.getState());
-        b.append(" ").append(call.getPhone().getPhoneName());
-        b.append(" isAlive ").append(call.getState().isAlive());
-        b.append(" isRinging ").append(call.getState().isRinging());
-        b.append(" isDialing ").append(call.getState().isDialing());
-        b.append(" isIdle ").append(call.isIdle());
-        b.append(" hasConnections ").append(call.hasConnections());
-        Log.d(LOG_TAG, b.toString());
-    }
-
-    /* package */ static void dumpCallState() {
-        PhoneApp app = PhoneApp.getInstance();
-        CallManager cm = app.mCM;
-        Log.d(LOG_TAG, "dumpCallState():");
-        Log.d(LOG_TAG, "- Call state = " + cm.getState());
-
-        dumpStateForCall(cm.getActiveFgCall(), "  - FG call: ");
-        dumpStateForCall(cm.getFirstActiveBgCall(), "  - BG call: ");
-        dumpStateForCall(cm.getFirstActiveRingingCall(), "  - RINGING call: ");
-
-        final boolean hasRingingCall = cm.hasActiveRingingCall();
-        final boolean hasActiveCall = cm.hasActiveFgCall();
-        final boolean hasHoldingCall = cm.hasActiveBgCall();
-        final boolean allLinesTaken = hasActiveCall && hasHoldingCall;
-        StringBuilder b = new StringBuilder(128);
-        b.append("  - hasRingingCall ").append(hasRingingCall);
-        b.append(" hasActiveCall ").append(hasActiveCall);
-        b.append(" hasHoldingCall ").append(hasHoldingCall);
-        b.append(" allLinesTaken ").append(allLinesTaken);
-        Log.d(LOG_TAG, b.toString());
-
-        Phone phone = cm.getDefaultPhone();
-        // On CDMA phones, dump out the CdmaPhoneCallState too:
-        if (phone.getPhoneType() == Phone.PHONE_TYPE_CDMA) {
-            if (app.cdmaPhoneCallState != null) {
-                Log.d(LOG_TAG, "  - CDMA call state: "
-                      + app.cdmaPhoneCallState.getCurrentCallState());
-            } else {
-                Log.d(LOG_TAG, "  - CDMA device, but null cdmaPhoneCallState!");
-            }
-        }
-
-        // Watch out: the isRinging() call below does NOT tell us anything
-        // about the state of the telephony layer; it merely tells us whether
-        // the Ringer manager is currently playing the ringtone.
-        boolean ringing = app.getRinger().isRinging();
-        Log.d(LOG_TAG, "  - Ringer state: " + ringing);
-    }
-
     /* package */ static void dumpCallState(Phone phone) {
-        PhoneApp app = PhoneApp.getInstance();
+        PhoneGlobals app = PhoneGlobals.getInstance();
         Log.d(LOG_TAG, "dumpCallState():");
         Log.d(LOG_TAG, "- Phone: " + phone + ", name = " + phone.getPhoneName()
               + ", state = " + phone.getState());
@@ -2491,7 +2647,7 @@ public class PhoneUtils {
         Log.d(LOG_TAG, b.toString());
 
         // On CDMA phones, dump out the CdmaPhoneCallState too:
-        if (phone.getPhoneType() == Phone.PHONE_TYPE_CDMA) {
+        if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA) {
             if (app.cdmaPhoneCallState != null) {
                 Log.d(LOG_TAG, "  - CDMA call state: "
                       + app.cdmaPhoneCallState.getCurrentCallState());
@@ -2513,7 +2669,7 @@ public class PhoneUtils {
 
     static void dumpCallManager() {
         Call call;
-        CallManager cm = PhoneApp.getInstance().mCM;
+        CallManager cm = PhoneGlobals.getInstance().mCM;
         StringBuilder b = new StringBuilder(128);
 
 
@@ -2576,4 +2732,11 @@ public class PhoneUtils {
         Log.d(LOG_TAG, "############## END dumpCallManager() ###############");
     }
 
+    /**
+     * @return if the context is in landscape orientation.
+     */
+    public static boolean isLandscape(Context context) {
+        return context.getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
+    }
 }

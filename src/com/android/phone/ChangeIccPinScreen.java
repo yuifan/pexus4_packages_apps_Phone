@@ -37,13 +37,12 @@ import android.widget.Toast;
 import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.IccCard;
 import com.android.internal.telephony.Phone;
-import com.android.internal.telephony.PhoneFactory;
 
 /**
  * "Change ICC PIN" UI for the Phone app.
  */
 public class ChangeIccPinScreen extends Activity {
-    private static final String LOG_TAG = PhoneApp.LOG_TAG;
+    private static final String LOG_TAG = PhoneGlobals.LOG_TAG;
     private static final boolean DBG = false;
 
     private static final int EVENT_PIN_CHANGED = 100;
@@ -92,7 +91,7 @@ public class ChangeIccPinScreen extends Activity {
     public void onCreate(Bundle icicle) {
         super.onCreate(icicle);
 
-        mPhone = PhoneFactory.getDefaultPhone();
+        mPhone = PhoneGlobals.getPhone();
 
         resolveIntent();
 

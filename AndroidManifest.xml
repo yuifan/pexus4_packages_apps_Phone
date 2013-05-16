@@ -15,9 +15,11 @@
 -->
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        xmlns:androidprv="http://schemas.android.com/apk/prv/res/android"
         package="com.android.phone"
+        coreApp="true"
         android:sharedUserId="android.uid.phone"
-        android:sharedUserLabel="@string/dialerIconLabel"
+        android:sharedUserLabel="@string/phoneAppLabel"
 >
 
     <original-package android:name="com.android.phone" />
@@ -41,7 +43,9 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.INTERNAL_SYSTEM_WINDOW" />
     <uses-permission android:name="android.permission.ADD_SYSTEM_SERVICE" />
@@ -55,6 +59,8 @@
     <uses-permission android:name="android.permission.STATUS_BAR" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.WRITE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS_NO_CONFIRMATION" />
     <uses-permission android:name="android.permission.SET_TIME_ZONE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -73,8 +79,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SHUTDOWN" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.BACKUP" />
+    <uses-permission android:name="android.permission.PERFORM_CDMA_PROVISIONING" />
     <uses-permission android:name="android.permission.USE_SIP" />
+    <uses-permission android:name="android.permission.REBOOT" />
+    <uses-permission android:name="android.permission.UPDATE_LOCK" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    <uses-permission android:name="com.android.smspush.WAPPUSH_MANAGER_BIND" />
+    <uses-permission android:name="android.permission.MANAGE_USERS" />
 
     <!-- This tells the activity manager to not delay any of our activity
          start requests, even if they happen immediately after the user
@@ -83,28 +94,38 @@
 
     <application android:name="PhoneApp"
                  android:persistent="true"
-                 android:label="@string/dialerIconLabel"
-                 android:icon="@drawable/ic_launcher_phone">
+                 android:label="@string/phoneAppLabel"
+                 android:icon="@mipmap/ic_launcher_phone">
             <provider android:name="IccProvider"
                       android:authorities="icc"
                       android:multiprocess="true"
+                      android:exported="true"
                       android:readPermission="android.permission.READ_CONTACTS"
                       android:writePermission="android.permission.WRITE_CONTACTS" />
 
         <!-- Dialer UI that only allows emergency calls -->
         <activity android:name="EmergencyDialer"
             android:label="@string/emergencyDialerIconLabel"
-            android:screenOrientation="nosensor">
+            android:theme="@style/EmergencyDialerTheme"
+            android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="com.android.phone.EmergencyDialer.DIAL" />
                 <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.android.phone.EmergencyDialer.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="tel" />
             </intent-filter>
         </activity>
 
         <activity android:name="ADNList" />
 
         <activity android:name="SimContacts"
-            android:label="@string/simContacts_title">
+            android:label="@string/simContacts_title"
+            android:theme="@style/SimImportTheme"
+            android:screenOrientation="portrait"
+            android:icon="@mipmap/ic_launcher_contacts">
 
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -122,9 +143,10 @@
         </activity>
 
         <activity android:name="OutgoingCallBroadcaster"
+                android:theme="@style/OutgoingCallBroadcasterTheme"
                 android:permission="android.permission.CALL_PHONE"
-                android:theme="@android:style/Theme.NoDisplay"
-                android:configChanges="orientation|keyboardHidden">
+                android:screenOrientation="nosensor"
+                android:configChanges="orientation|screenSize|keyboardHidden">
             <!-- CALL action intent filters, for the various ways
                  of initiating an outgoing call. -->
             <intent-filter>
@@ -153,8 +175,7 @@
 
         <activity-alias android:name="EmergencyOutgoingCallBroadcaster"
                 android:targetActivity="OutgoingCallBroadcaster"
-                android:permission="android.permission.CALL_PRIVILEGED"
-                android:theme="@android:style/Theme.NoDisplay">
+                android:permission="android.permission.CALL_PRIVILEGED">
             <intent-filter>
                 <action android:name="android.intent.action.CALL_EMERGENCY" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -180,7 +201,7 @@
 
         <activity-alias android:name="PrivilegedOutgoingCallBroadcaster"
                 android:targetActivity="OutgoingCallBroadcaster"
-                android:theme="@android:style/Theme.NoDisplay"
+                android:screenOrientation="nosensor"
                 android:permission="android.permission.CALL_PRIVILEGED">
             <intent-filter>
                 <action android:name="android.intent.action.CALL_PRIVILEGED" />
@@ -214,126 +235,161 @@
             </intent-filter>
         </receiver>
 
+        <!-- Main in-call UI activity.  This is never launched directly
+             from outside the phone app; instead, it's either launched by
+             the OutgoingCallBroadcaster (for outgoing calls), or as the
+             fullScreenIntent of a notification (for incoming calls.) -->
         <activity android:name="InCallScreen"
-            android:theme="@android:style/Theme.NoTitleBar"
+            android:theme="@style/Theme.InCallScreen"
             android:label="@string/phoneIconLabel"
             android:excludeFromRecents="true"
             android:launchMode="singleInstance"
-            android:screenOrientation="portrait"
-            android:configChanges="orientation|keyboardHidden|uiMode"
+            android:screenOrientation="nosensor"
+            android:configChanges="keyboardHidden"
             android:exported="false">
         </activity>
 
+        <!-- Trampoline activity that handles the PERFORM_CDMA_PROVISIONING intent. -->
         <activity android:name="InCallScreenShowActivation"
             android:permission="android.permission.PERFORM_CDMA_PROVISIONING"
             android:label="@string/phoneIconLabel"
+            android:theme="@android:style/Theme.NoDisplay"
             android:excludeFromRecents="true">
             <intent-filter>
-                <action android:name="com.android.phone.InCallScreen.SHOW_ACTIVATION" />
+                <action android:name="com.android.phone.PERFORM_CDMA_PROVISIONING" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
-        <!-- general settings -->
-        <activity android:name="Settings" android:label="@string/settings_label">
+        <!-- "Mobile network settings" screen, used on both
+             non-voice-capable tablets and regular phone devices. -->
+        <activity android:name="MobileNetworkSettings"
+            android:label="@string/settings_label"
+            android:theme="@style/Theme.Settings">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.MAIN" />
                 <action android:name="android.settings.DATA_ROAMING_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <activity-alias android:name="Settings"
+            android:targetActivity="MobileNetworkSettings" />
 
         <!-- networks setting -->
         <!-- service to handle network query requests sent to RIL -->
         <service android:name="NetworkQueryService" />
 
+        <!-- clearing of missed call notifications  -->
+        <service android:name="ClearMissedCallsService" />
+
         <activity android:name="NetworkSetting"
-            android:label="@string/networks"
-            android:configChanges="orientation|keyboardHidden">
+                android:label="@string/networks"
+                android:configChanges="orientation|screenSize|keyboardHidden"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <action android:name="android.settings.NETWORK_OPERATOR_" />
+                <action android:name="android.settings.NETWORK_OPERATOR_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
         <activity android:name="GsmUmtsOptions"
-            android:label="@string/gsm_umts_options">
+                android:label="@string/gsm_umts_options"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <activity android:name="CdmaOptions"
-            android:label="@string/cdma_options">
+                android:label="@string/cdma_options"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <activity android:name="GsmUmtsCallOptions"
-            android:label="@string/gsm_umts_options">
+                android:label="@string/gsm_umts_options"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <activity android:name="CdmaCallOptions"
-            android:label="@string/cdma_options">
+                android:label="@string/cdma_options"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <activity android:name="GsmUmtsCallForwardOptions"
-            android:label="@string/labelCF"
-            android:configChanges="orientation|keyboardHidden">
+                android:label="@string/labelCF"
+                android:configChanges="orientation|screenSize|keyboardHidden"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <activity android:name="GsmUmtsAdditionalCallOptions"
-            android:label="@string/labelGSMMore"
-            android:configChanges="orientation|keyboardHidden">
+                android:label="@string/labelGSMMore"
+                android:configChanges="orientation|screenSize|keyboardHidden"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <activity android:name="CellBroadcastSms"
-            android:label="@string/cell_broadcast_sms">
+            android:label="@string/cell_broadcast_sms"
+            android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <!-- fdn setting -->
-        <activity android:name="FdnSetting" android:label="@string/fdn">
+        <activity android:name="FdnSetting"
+                android:label="@string/fdn"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
-        <activity android:name="EnableFdnScreen" android:label="">
+        <activity android:name="EnableFdnScreen"
+                android:label=""
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
         </activity>
 
         <!-- SIM PIN setting -->
-        <activity android:name="EnableIccPinScreen" android:label="@string/enable_pin">
+        <activity android:name="EnableIccPinScreen"
+                android:label="@string/enable_pin"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.DEVELOPMENT_PREFERENCE" />
             </intent-filter>
         </activity>
 
-        <activity android:name="ChangeIccPinScreen" android:label="@string/change_pin">
+        <activity android:name="ChangeIccPinScreen"
+                android:label="@string/change_pin"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.DEVELOPMENT_PREFERENCE" />
             </intent-filter>
         </activity>
 
-        <activity android:name="GetPin2Screen" android:label="@string/get_pin2"
-                  android:windowSoftInputMode="stateVisible">
+        <activity android:name="GetPin2Screen"
+                android:label="@string/get_pin2"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge"
+                android:windowSoftInputMode="stateVisible">
         </activity>
 
         <activity android:name="EditFdnContactScreen"
@@ -345,30 +401,35 @@
         </activity>
 
         <activity android:name="DataRoamingReenable" android:label="@string/android:dialog_alert_title"
-            android:theme="@android:style/Theme.Dialog">
+            android:theme="@android:style/Theme.Holo.Dialog">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
-        <!-- Data usage and throttling setting -->
+        <!-- Data usage and throttling setting for ThrottleService in framework. -->
         <activity android:name="DataUsage"
-            android:label="@string/throttle_data_usage">
+                android:label="@string/throttle_data_usage"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
         <!-- data roaming setting -->
-        <activity android:name="RoamingSetting" android:label="@string/roaming">
+        <activity android:name="RoamingSetting"
+                android:label="@string/roaming"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
 
-        <!-- call feature setting -->
-        <activity android:name="CallFeaturesSetting" android:label="@string/call_settings"
-            android:configChanges="orientation|keyboardHidden">
+        <!-- "Call settings" UI, used only on voice-capable phone devices. -->
+        <activity android:name="CallFeaturesSetting"
+                android:label="@string/call_settings"
+                android:configChanges="orientation|screenSize|keyboardHidden"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.MAIN" />
@@ -377,21 +438,16 @@
             </intent-filter>
         </activity>
 
-        <!-- emergency call handler, coordinates emergency calls -->
-        <activity android:name="EmergencyCallHandler" android:label="@string/phoneIconLabel"
-            android:excludeFromRecents="true"
-            android:launchMode="singleInstance">
-        </activity>
-
-        <!-- bluetooth headset service -->
-        <service android:name="BluetoothHeadsetService">
+        <!-- bluetooth phone service -->
+        <service android:name="BluetoothPhoneService">
             <intent-filter>
-                <action android:name="android.bluetooth.IBluetoothHeadset" />
+                <action android:name="android.bluetooth.IBluetoothHeadsetPhone" />
             </intent-filter>
         </service>
 
         <!-- Broadcast Receiver that will process BOOT Complete and launch OTA -->
-        <receiver android:name="OtaStartupReceiver" android:exported="false">
+        <receiver android:name="OtaStartupReceiver" android:exported="false"
+                androidprv:primaryUserOnly="true">
             <intent-filter android:priority="100">
                  <action android:name="android.intent.action.BOOT_COMPLETED"/>
             </intent-filter>
@@ -400,6 +456,9 @@
         <!-- CDMA Emergency Callback Mode -->
         <service android:name="EmergencyCallbackModeService">
         </service>
+
+        <!-- service to dump telephony information -->
+        <service android:name="TelephonyDebugService" />
 
         <activity android:name="EmergencyCallbackModeExitDialog"
             android:excludeFromRecents="true"
@@ -424,20 +483,49 @@
 
         <activity android:label="Sip Settings"
                   android:name=".sip.SipSettings"
+                  android:theme="@android:style/Theme.Holo.DialogWhenLarge"
                   android:launchMode="singleTop"
-                  android:configChanges="orientation|keyboardHidden">
+                  android:configChanges="orientation|screenSize|keyboardHidden"
+                  android:uiOptions="splitActionBarWhenNarrow">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <action android:name="android.net.sip.NOTIFY" />
             </intent-filter>
         </activity>
         <activity android:name=".sip.SipEditor"
-                android:configChanges="orientation|keyboardHidden">
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge"
+                android:configChanges="orientation|screenSize|keyboardHidden"
+                android:uiOptions="splitActionBarWhenNarrow">
         </activity>
         <activity android:name=".SipCallOptionHandler"
-                android:configChanges="orientation|keyboardHidden">
+                android:theme="@style/SipCallOptionHandlerTheme"
+                android:screenOrientation="nosensor"
+                android:configChanges="orientation|screenSize|keyboardHidden">
         </activity>
+
+        <activity android:name="RespondViaSmsManager$Settings"
+                android:label="@string/respond_via_sms_setting_title"
+                android:configChanges="orientation|screenSize|keyboardHidden"
+                android:theme="@android:style/Theme.Holo.DialogWhenLarge">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+        </activity>
+
+        <receiver android:name="CallerInfoCacheUpdateReceiver">
+            <intent-filter>
+                <action android:name="com.android.phone.UPDATE_CALLER_INFO_CACHE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- BroadcastReceiver for receiving Intents from Notification mechanism. -->
+        <receiver android:name="PhoneGlobals$NotificationBroadcastReceiver" exported="false">
+            <intent-filter>
+                <action android:name="com.android.phone.ACTION_HANG_UP_ONGOING_CALL" />
+                <action android:name="com.android.phone.ACTION_CALL_BACK_FROM_NOTIFICATION" />
+                <action android:name="com.android.phone.ACTION_SEND_SMS_FROM_NOTIFICATION" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>
-

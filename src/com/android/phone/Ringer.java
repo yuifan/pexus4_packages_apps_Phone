@@ -29,7 +29,9 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.os.SystemVibrator;
 import android.os.Vibrator;
+import android.provider.Settings;
 import android.util.Log;
 
 import com.android.internal.telephony.Phone;
@@ -39,7 +41,7 @@ import com.android.internal.telephony.Phone;
 public class Ringer {
     private static final String LOG_TAG = "Ringer";
     private static final boolean DBG =
-            (PhoneApp.DBG_LEVEL >= 1) && (SystemProperties.getInt("ro.debuggable", 0) == 1);
+            (PhoneGlobals.DBG_LEVEL >= 1) && (SystemProperties.getInt("ro.debuggable", 0) == 1);
 
     private static final int PLAY_RING_ONCE = 1;
     private static final int STOP_RING = 3;
@@ -47,11 +49,14 @@ public class Ringer {
     private static final int VIBRATE_LENGTH = 1000; // ms
     private static final int PAUSE_LENGTH = 1000; // ms
 
+    /** The singleton instance. */
+    private static Ringer sInstance;
+
     // Uri for the ringtone.
-    Uri mCustomRingtoneUri;
+    Uri mCustomRingtoneUri = Settings.System.DEFAULT_RINGTONE_URI;
 
     Ringtone mRingtone;
-    Vibrator mVibrator = new Vibrator();
+    Vibrator mVibrator;
     IPowerManager mPowerManager;
     volatile boolean mContinueVibrating;
     VibratorThread mVibratorThread;
@@ -61,9 +66,28 @@ public class Ringer {
     private long mFirstRingEventTime = -1;
     private long mFirstRingStartTime = -1;
 
-    Ringer(Context context) {
+    /**
+     * Initialize the singleton Ringer instance.
+     * This is only done once, at startup, from PhoneApp.onCreate().
+     */
+    /* package */ static Ringer init(Context context) {
+        synchronized (Ringer.class) {
+            if (sInstance == null) {
+                sInstance = new Ringer(context);
+            } else {
+                Log.wtf(LOG_TAG, "init() called multiple times!  sInstance = " + sInstance);
+            }
+            return sInstance;
+        }
+    }
+
+    /** Private constructor; @see init() */
+    private Ringer(Context context) {
         mContext = context;
         mPowerManager = IPowerManager.Stub.asInterface(ServiceManager.getService(Context.POWER_SERVICE));
+        // We don't rely on getSystemService(Context.VIBRATOR_SERVICE) to make sure this
+        // vibrator object will be isolated from others.
+        mVibrator = new SystemVibrator();
     }
 
     /**
@@ -125,11 +149,11 @@ public class Ringer {
 
         synchronized (this) {
             try {
-                if (PhoneApp.getInstance().showBluetoothIndication()) {
+                if (PhoneGlobals.getInstance().showBluetoothIndication()) {
                     mPowerManager.setAttentionLight(true, 0x000000ff);
-		} else {
+                } else {
                     mPowerManager.setAttentionLight(true, 0x00ffffff);
-		}
+                }
             } catch (RemoteException ex) {
                 // the other end of this binder call is in the system process.
             }
@@ -176,7 +200,12 @@ public class Ringer {
 
     boolean shouldVibrate() {
         AudioManager audioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
-        return audioManager.shouldVibrate(AudioManager.VIBRATE_TYPE_RINGER);
+        int ringerMode = audioManager.getRingerMode();
+        if (CallFeaturesSetting.getVibrateWhenRinging(mContext)) {
+            return ringerMode != AudioManager.RINGER_MODE_SILENT;
+        } else {
+            return ringerMode == AudioManager.RINGER_MODE_VIBRATE;
+        }
     }
 
     /**
